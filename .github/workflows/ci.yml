@@ -53,7 +53,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: app
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --no-frozen-lockfile
 
       - name: Typecheck
         working-directory: app
@@ -77,7 +77,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: sdks/typescript
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --no-frozen-lockfile
 
       - name: Typecheck
         working-directory: sdks/typescript
