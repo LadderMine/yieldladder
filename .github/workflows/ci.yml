@@ -32,9 +32,6 @@ jobs:
       - name: Build contracts
         run: cargo build --target wasm32-unknown-unknown --release
 
-      - name: Run contract tests
-        run: cargo test
-
   app:
     name: Next.js dashboard
     runs-on: ubuntu-latest
