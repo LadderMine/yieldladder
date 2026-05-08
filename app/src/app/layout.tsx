@@ -1,13 +1,14 @@
 import type { Metadata } from 'next';
+import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'YieldLadder',
-  description: 'Time-locked USDC vaults on Soroban with auto-routed AMM yield.',
+  title: 'YieldLadder — Time-Locked USDC Vaults on Stellar',
+  description: 'Deposit USDC into time-locked vaults on Soroban. Auto-routed to curated Stellar AMM pools. Non-custodial, immutable, 100% on-chain yield.',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang='en'>
+    <html lang="en">
       <body>{children}</body>
     </html>
   );
