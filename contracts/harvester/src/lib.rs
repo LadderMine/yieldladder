@@ -1,6 +1,13 @@
 #![no_std]
 use soroban_sdk::{contract, contractimpl, Env};
 
+/// Harvester is a permissionless contract that claims accumulated trading fees
+/// from the Stellar AMM liquidity pools allocated by the Strategy Vault.
+///
+/// Anyone may call `harvest()` once the cooldown period has elapsed. The caller
+/// receives a bounty of 10 basis points (0.10%) of the total harvested yield as
+/// an incentive for timely execution, without requiring a privileged keeper role.
+/// Harvested USDC is compounded back into the Strategy Vault automatically.
 #[contract]
 pub struct Harvester;
 

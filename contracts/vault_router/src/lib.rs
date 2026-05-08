@@ -1,6 +1,11 @@
 #![no_std]
 use soroban_sdk::{contract, contractimpl, Env};
 
+/// VaultRouter is the user-facing entry point for the YieldLadder protocol.
+///
+/// It validates tier rules (minimum deposit, lock duration), mints non-transferable
+/// share-units proportional to `deposit_amount * lock_multiplier`, and forwards
+/// deposited USDC to the appropriate tier vault for allocation by the Strategy Vault.
 #[contract]
 pub struct VaultRouter;
 
