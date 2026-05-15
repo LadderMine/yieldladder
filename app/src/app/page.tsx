@@ -40,7 +40,7 @@ export default function Home() {
 
       <section className={styles.hero}>
         <div className={styles.heroInner}>
-          <div className={styles.heroBadge}>Live on Stellar · Soroban</div>
+          {/* <div className={styles.heroBadge}>Live on Stellar · Soroban</div> */}
           <h1 className={styles.heroTitle}>
             Earn More.<br />Lock Smarter.
           </h1>
