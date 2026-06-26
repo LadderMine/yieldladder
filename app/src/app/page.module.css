@@ -27,6 +27,22 @@
   color: #f1f5f9;
 }
 
+.navLinks {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+}
+
+.navLink {
+  font-size: 0.875rem;
+  color: #94a3b8;
+  transition: color 0.15s;
+}
+
+.navLink:hover {
+  color: #f1f5f9;
+}
+
 .navCta {
   padding: 0.45rem 1.1rem;
   border-radius: 8px;

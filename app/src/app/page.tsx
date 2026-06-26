@@ -1,4 +1,5 @@
 import styles from './page.module.css';
+import { StatsBar } from '@/components/StatsBar';
 
 const VAULTS = [
   { name: 'Flex', lock: 'No lock', multiplier: '1.00×', exitFee: '0%', minDeposit: '1 USDC', featured: false, badge: null },
@@ -35,7 +36,10 @@ export default function Home() {
     <div className={styles.page}>
       <nav className={styles.nav}>
         <span className={styles.navLogo}>YieldLadder</span>
-        <a href="#vaults" className={styles.navCta}>Explore Vaults</a>
+        <div className={styles.navLinks}>
+          <a href="/analytics" className={styles.navLink}>Analytics</a>
+          <a href="#vaults" className={styles.navCta}>Explore Vaults</a>
+        </div>
       </nav>
 
       <section className={styles.hero}>
@@ -63,27 +67,7 @@ export default function Home() {
         <div className={styles.heroBg} aria-hidden="true" />
       </section>
 
-      <section className={styles.stats}>
-        <div className={styles.stat}>
-          <span className={styles.statValue}>4</span>
-          <span className={styles.statLabel}>Vault Tiers</span>
-        </div>
-        <div className={styles.statDivider} />
-        <div className={styles.stat}>
-          <span className={styles.statValue}>1.40×</span>
-          <span className={styles.statLabel}>Max Multiplier</span>
-        </div>
-        <div className={styles.statDivider} />
-        <div className={styles.stat}>
-          <span className={styles.statValue}>0%</span>
-          <span className={styles.statLabel}>Protocol Fee</span>
-        </div>
-        <div className={styles.statDivider} />
-        <div className={styles.stat}>
-          <span className={styles.statValue}>35%</span>
-          <span className={styles.statLabel}>Max Pool Exposure</span>
-        </div>
-      </section>
+      <StatsBar />
 
       <section className={styles.vaults} id="vaults">
         <div className={styles.sectionHeader}>
