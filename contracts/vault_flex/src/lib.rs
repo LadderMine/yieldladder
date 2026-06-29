@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, Address, Env, Symbol, symbol_short, panic_with_error};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol, symbol_short};
 use shared::fixed_point::{mul_fp, div_fp, SCALING_FACTOR};
 use shared::checkpoint::{record_deposit_checkpoint, is_eligible_for_yield};
 
@@ -9,7 +9,8 @@ const ADMIN_KEY: Symbol = symbol_short!("admin");
 const STRATEGY_KEY: Symbol = symbol_short!("strategy");
 const TOTAL_SHARES_KEY: Symbol = symbol_short!("t_shares");
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
+#[contracttype]
 pub enum DataKey {
     Balance(Address),
     Shares(Address),

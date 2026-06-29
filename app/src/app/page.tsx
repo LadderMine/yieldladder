@@ -1,7 +1,7 @@
 'use client';
 
 import styles from './page.module.css';
-import { StatsBar } from '@/components/StatsBar';
+import StatsBar from '@/components/StatsBar';
 
 const VAULTS = [
   { name: 'Flex', lock: 'No lock', multiplier: '1.00×', exitFee: '0%', minDeposit: '1 USDC', featured: false, badge: null },

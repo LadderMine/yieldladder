@@ -19,7 +19,9 @@ function ExposureBar({ pct }: { pct: number }) {
 }
 
 export default function AllocationsPage() {
-  const { pools, totalAllocated, isLoading } = useAllocations();
+  const { allocations, loading: isLoading } = useAllocations();
+  const pools = allocations?.pools ?? [];
+  const totalAllocated = pools.reduce((sum, p) => sum + (parseInt(p.amount, 10) || 0), 0) / 10_000_000;
 
   return (
     <main style={s.page}>
@@ -72,20 +74,19 @@ export default function AllocationsPage() {
                 </thead>
                 <tbody>
                   {pools.map((pool) => {
-                    const ilColor = pool.ilPct > 2 ? '#f59e0b' : '#64748b';
+                    const allocatedUSDC = (parseInt(pool.amount, 10) || 0) / 10_000_000;
+                    const capHeadroom = 35 - pool.percentage;
                     return (
-                      <tr key={pool.id}>
-                        <td style={{ ...s.td, fontWeight: 600, color: '#f1f5f9' }}>{pool.pair}</td>
-                        <td style={s.td}>{formatCurrency(pool.allocatedUSDC)}</td>
-                        <td style={s.td}>{pool.strategyPct.toFixed(1)}%</td>
-                        <td style={{ ...s.td, color: '#22c55e' }}>+{pool.capHeadroom.toFixed(1)}%</td>
+                      <tr key={pool.poolId}>
+                        <td style={{ ...s.td, fontWeight: 600, color: '#f1f5f9' }}>{pool.poolId}</td>
+                        <td style={s.td}>{formatCurrency(allocatedUSDC)}</td>
+                        <td style={s.td}>{pool.percentage.toFixed(1)}%</td>
+                        <td style={{ ...s.td, color: '#22c55e' }}>+{capHeadroom.toFixed(1)}%</td>
                         <td style={{ ...s.td, minWidth: 160 }}>
-                          <ExposureBar pct={pool.strategyPct} />
+                          <ExposureBar pct={pool.percentage} />
                         </td>
-                        <td style={{ ...s.td, color: '#34d399' }}>{pool.feeAPY30d.toFixed(1)}%</td>
-                        <td style={{ ...s.td, color: ilColor }}>
-                          {pool.ilPct > 2 ? '⚠ ' : ''}{pool.ilPct.toFixed(1)}%
-                        </td>
+                        <td style={{ ...s.td, color: '#64748b' }}>—</td>
+                        <td style={{ ...s.td, color: '#64748b' }}>—</td>
                       </tr>
                     );
                   })}

@@ -1,6 +1,6 @@
 [package]
-name    = "vault_l12"
-version = "0.3.0"
+name = "shared"
+version = "0.1.0"
 edition = "2021"
 
 [lib]
@@ -11,4 +11,3 @@ soroban-sdk = "20"
 
 [dev-dependencies]
 soroban-sdk = { version = "20", features = ["testutils"] }
-

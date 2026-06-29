@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { useTVL } from '@/hooks/useTVL';
 import { useAPY } from '@/hooks/useAPY';
+import type { APYData } from '@/hooks/useAPY';
 import { useHarvestHistory } from '@/hooks/useHarvestHistory';
 
 type TimeRange = '7d' | '30d' | 'all';
@@ -37,10 +38,18 @@ function Skeleton() {
 
 export default function AnalyticsPage() {
   const [range, setRange] = useState<TimeRange>('30d');
-  const { total: totalTVL, byTier, isLoading: tvlLoading } = useTVL();
-  const { byTier: apyByTier, best: bestAPY, isLoading: apyLoading } = useAPY();
+  const { tvl, loading: tvlLoading } = useTVL();
+  const { apy: flexAPY, loading: flexLoading } = useAPY('Flex');
+  const { apy: l3APY, loading: l3Loading } = useAPY('L3');
+  const { apy: l6APY, loading: l6Loading } = useAPY('L6');
+  const { apy: l12APY, loading: l12Loading } = useAPY('L12');
   const { events, isLoading: historyLoading } = useHarvestHistory(20);
 
+  const totalTVL = tvl?.totalUsdc ?? 0;
+  const byTier = tvl?.perTier ?? [];
+  const apyByTier: APYData[] = [flexAPY, l3APY, l6APY, l12APY].filter((a): a is APYData => a !== null);
+  const bestAPY = apyByTier.length > 0 ? Math.max(...apyByTier.map(a => a.apy30d)) : 0;
+  const apyLoading = flexLoading || l3Loading || l6Loading || l12Loading;
   const isLoading = tvlLoading || apyLoading || historyLoading;
 
   const rangeEvents = range === '7d'
@@ -112,14 +121,14 @@ export default function AnalyticsPage() {
           ) : (
             <div style={s.tvlChart}>
               {byTier.map((tier) => {
-                const pct = totalTVL > 0 ? (tier.tvl / totalTVL) * 100 : 0;
+                const pct = totalTVL > 0 ? (tier.tvlUsdc / totalTVL) * 100 : 0;
                 return (
                   <div key={tier.tier} style={s.tvlRow}>
-                    <span style={s.tvlLabel}>{tier.label}</span>
+                    <span style={s.tvlLabel}>{tier.tier}</span>
                     <div style={s.tvlBarTrack}>
                       <div style={{ ...s.tvlBar, width: `${pct.toFixed(1)}%` }} />
                     </div>
-                    <span style={s.tvlValue}>{formatCurrency(tier.tvl)}</span>
+                    <span style={s.tvlValue}>{formatCurrency(tier.tvlUsdc)}</span>
                     <span style={s.tvlPct}>{pct.toFixed(1)}%</span>
                   </div>
                 );
@@ -146,10 +155,10 @@ export default function AnalyticsPage() {
                 <tbody>
                   {apyByTier.map((tier) => (
                     <tr key={tier.tier}>
-                      <td style={s.td}>{tier.label}</td>
-                      <td style={{ ...s.td, ...s.apyValue }}>{tier.current.toFixed(1)}%</td>
-                      <td style={s.td}>{tier.sevenDay.toFixed(1)}%</td>
-                      <td style={s.td}>{tier.thirtyDay.toFixed(1)}%</td>
+                      <td style={s.td}>{tier.tier}</td>
+                      <td style={{ ...s.td, ...s.apyValue }}>{tier.apy7d.toFixed(1)}%</td>
+                      <td style={s.td}>{tier.apy7d.toFixed(1)}%</td>
+                      <td style={s.td}>{tier.apy30d.toFixed(1)}%</td>
                     </tr>
                   ))}
                 </tbody>
