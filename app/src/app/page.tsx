@@ -248,6 +248,11 @@ export default function Home() {
           </a>
           <a href="/blog">Updates</a>
           <a href="mailto:security@yieldladder.dev">Security</a>
+          <a href="/learn">Learn</a>
+          <a href="/faq">FAQ</a>
+          <a href="/audit">Audit</a>
+          <a href="/contracts">Contracts</a>
+          <a href="/roadmap">Roadmap</a>
           <a href="/terms">Terms</a>
           <a href="/privacy">Privacy</a>
         </div>
