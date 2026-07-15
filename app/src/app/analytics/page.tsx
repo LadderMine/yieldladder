@@ -1,10 +1,12 @@
 'use client';
 
 import { useState } from 'react';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { useTVL } from '@/hooks/useTVL';
 import { useAPY } from '@/hooks/useAPY';
 import type { APYData } from '@/hooks/useAPY';
 import { useHarvestHistory } from '@/hooks/useHarvestHistory';
+import { useReferralHistory } from '@/hooks/useReferralHistory';
 
 type TimeRange = '7d' | '30d' | 'all';
 
@@ -12,6 +14,10 @@ function formatCurrency(n: number): string {
   if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(2)}M`;
   if (n >= 1_000) return `$${(n / 1_000).toFixed(1)}K`;
   return `$${n.toFixed(2)}`;
+}
+
+function formatStroopsToUsdc(stroops: number): number {
+  return stroops / 10_000_000; // USDC has 7 decimals on Stellar
 }
 
 function formatDate(iso: string): string {
@@ -36,6 +42,14 @@ function Skeleton() {
   return <div style={s.skeleton} />;
 }
 
+function EmptyState({ message }: { message: string }) {
+  return (
+    <div style={s.emptyState}>
+      <p style={s.emptyText}>{message}</p>
+    </div>
+  );
+}
+
 export default function AnalyticsPage() {
   const [range, setRange] = useState<TimeRange>('30d');
   const { tvl, loading: tvlLoading } = useTVL();
@@ -43,23 +57,49 @@ export default function AnalyticsPage() {
   const { apy: l3APY, loading: l3Loading } = useAPY('L3');
   const { apy: l6APY, loading: l6Loading } = useAPY('L6');
   const { apy: l12APY, loading: l12Loading } = useAPY('L12');
-  const { events, isLoading: historyLoading } = useHarvestHistory(20);
+  const { events: harvestEvents, isLoading: historyLoading } = useHarvestHistory(20);
+  const { 
+    events: referralEvents, 
+    isLoading: referralLoading, 
+    trackedVisits, 
+    confirmedDeposits, 
+    conversionRate,
+    topReferrers,
+    depositSizeComparison,
+  } = useReferralHistory(20);
 
   const totalTVL = tvl?.totalUsdc ?? 0;
   const byTier = tvl?.perTier ?? [];
   const apyByTier: APYData[] = [flexAPY, l3APY, l6APY, l12APY].filter((a): a is APYData => a !== null);
   const bestAPY = apyByTier.length > 0 ? Math.max(...apyByTier.map(a => a.apy30d)) : 0;
   const apyLoading = flexLoading || l3Loading || l6Loading || l12Loading;
-  const isLoading = tvlLoading || apyLoading || historyLoading;
+  const isLoading = tvlLoading || apyLoading || historyLoading || referralLoading;
 
   const rangeEvents = range === '7d'
-    ? events.slice(0, 1)
+    ? harvestEvents.slice(0, 1)
     : range === '30d'
-    ? events.slice(0, 4)
-    : events;
+    ? harvestEvents.slice(0, 4)
+    : harvestEvents;
+
+  const rangeReferralEvents = range === '7d'
+    ? referralEvents.slice(0, 1)
+    : range === '30d'
+    ? referralEvents.slice(0, 4)
+    : referralEvents;
 
   const totalHarvested = rangeEvents.reduce((sum, e) => sum + e.yieldAmount, 0);
+  const totalReferralVolume = rangeReferralEvents.reduce((sum, e) => sum + formatStroopsToUsdc(e.amount), 0);
   const uniqueDepositors = 127;
+
+  // Prepare data for referral chart
+  const referralChartData = rangeReferralEvents
+    .slice()
+    .reverse()
+    .map((e) => ({
+      date: formatDate(e.date),
+      volume: formatStroopsToUsdc(e.amount),
+      tier: e.tier,
+    }));
 
   return (
     <main style={s.page}>
@@ -108,9 +148,19 @@ export default function AnalyticsPage() {
             subtext={`${range === 'all' ? 'All time' : range.toUpperCase()}, auto-compounded`}
           />
           <StatCard
-            label="Unique Depositors"
-            value={isLoading ? '—' : uniqueDepositors.toString()}
-            subtext="Active vault positions"
+            label="Tracked Link Visits"
+            value={referralLoading ? '—' : trackedVisits.toLocaleString()}
+            subtext="From referral links"
+          />
+          <StatCard
+            label="Confirmed Referral Deposits"
+            value={referralLoading ? '—' : confirmedDeposits.toLocaleString()}
+            subtext="On-chain confirmed"
+          />
+          <StatCard
+            label="Conversion Rate"
+            value={referralLoading ? '—' : `${conversionRate.toFixed(1)}%`}
+            subtext="Deposits / Visits"
           />
         </div>
 
@@ -196,6 +246,147 @@ export default function AnalyticsPage() {
                 </tbody>
               </table>
             </div>
+          )}
+        </section>
+
+        <section style={s.section}>
+          <h2 style={s.sectionTitle}>Referral Volume</h2>
+          {referralLoading ? (
+            <Skeleton />
+          ) : referralChartData.length === 0 ? (
+            <EmptyState message="No referral volume data yet. Referral deposits will appear here once they begin." />
+          ) : (
+            <div style={{ height: 400 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={referralChartData} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+                  <XAxis
+                    dataKey="date"
+                    stroke="#64748b"
+                    tick={{ fontSize: 12 }}
+                  />
+                  <YAxis
+                    stroke="#64748b"
+                    tick={{ fontSize: 12 }}
+                    tickFormatter={(value) => `$${value.toLocaleString()}`}
+                  />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: '#0f172a',
+                      border: '1px solid rgba(255,255,255,0.1)',
+                      borderRadius: 8,
+                    }}
+                    labelStyle={{ color: '#f1f5f9' }}
+                    formatter={(value: number) => [`$${value.toLocaleString()}`, 'Volume']}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="volume"
+                    stroke="#3b82f6"
+                    strokeWidth={2}
+                    dot={{ fill: '#3b82f6', r: 4 }}
+                    activeDot={{ r: 6 }}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </section>
+
+        <section style={s.section}>
+          <h2 style={s.sectionTitle}>Top Referrers</h2>
+          {referralLoading ? (
+            <Skeleton />
+          ) : topReferrers.length === 0 ? (
+            <EmptyState message="No referrers yet. Top referrers will be ranked here once referral deposits begin." />
+          ) : (
+            <div style={s.tableWrap}>
+              <table style={s.table}>
+                <thead>
+                  <tr>
+                    <th style={s.th}>Rank</th>
+                    <th style={s.th}>Referrer</th>
+                    <th style={s.th}>Total Volume</th>
+                    <th style={s.th}>Deposits</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {topReferrers.map((referrer, index) => (
+                    <tr key={referrer.referrer}>
+                      <td style={s.td}>#{index + 1}</td>
+                      <td style={{ ...s.td, ...s.mono }}>{referrer.referrer}</td>
+                      <td style={s.td}>{formatCurrency(referrer.totalVolume)}</td>
+                      <td style={s.td}>{referrer.depositCount.toLocaleString()}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+
+        <section style={s.section}>
+          <h2 style={s.sectionTitle}>Referred vs. Organic Average Deposit Size</h2>
+          {referralLoading ? (
+            <Skeleton />
+          ) : depositSizeComparison.referredDepositCount === 0 ? (
+            <EmptyState message="No referred deposits yet. The comparison will appear once referral activity begins." />
+          ) : (
+            (() => {
+              const { avgReferredDeposit, avgOrganicDeposit, referredDepositCount, organicDepositCount, referredVolume, organicVolume } = depositSizeComparison;
+              const maxAvg = Math.max(avgReferredDeposit, avgOrganicDeposit, 1);
+              const referredPct = (avgReferredDeposit / maxAvg) * 100;
+              const organicPct = (avgOrganicDeposit / maxAvg) * 100;
+              const delta = avgOrganicDeposit - avgReferredDeposit;
+              const deltaPct = avgReferredDeposit > 0
+                ? ((delta / avgReferredDeposit) * 100)
+                : 0;
+              return (
+                <>
+                  <div style={s.cardGrid}>
+                    <StatCard
+                      label="Avg Referred Deposit"
+                      value={formatCurrency(avgReferredDeposit)}
+                      subtext={`${referredDepositCount.toLocaleString()} deposits · ${formatCurrency(referredVolume)} total`}
+                    />
+                    <StatCard
+                      label="Avg Organic Deposit"
+                      value={formatCurrency(avgOrganicDeposit)}
+                      subtext={`${organicDepositCount.toLocaleString()} deposits · ${formatCurrency(organicVolume)} total`}
+                    />
+                    <StatCard
+                      label="Organic vs. Referred"
+                      value={delta >= 0 ? `+${formatCurrency(delta)}` : formatCurrency(delta)}
+                      subtext={delta >= 0
+                        ? `Organic deposits are ${deltaPct.toFixed(1)}% larger`
+                        : `Referred deposits are ${Math.abs(deltaPct).toFixed(1)}% larger`}
+                    />
+                  </div>
+                  <div style={s.comparisonBars}>
+                    <div style={s.comparisonRow}>
+                      <span style={s.comparisonLabel}>Referred</span>
+                      <div style={s.comparisonBarTrack}>
+                        <div style={{
+                          ...s.comparisonBarReferred,
+                          width: `${referredPct.toFixed(1)}%`,
+                        }} />
+                      </div>
+                      <span style={s.comparisonValue}>{formatCurrency(avgReferredDeposit)}</span>
+                    </div>
+                    <div style={s.comparisonRow}>
+                      <span style={s.comparisonLabel}>Organic</span>
+                      <div style={s.comparisonBarTrack}>
+                        <div style={{
+                          ...s.comparisonBarOrganic,
+                          width: `${organicPct.toFixed(1)}%`,
+                        }} />
+                      </div>
+                      <span style={s.comparisonValue}>{formatCurrency(avgOrganicDeposit)}</span>
+                    </div>
+                  </div>
+                </>
+              );
+            })()
           )}
         </section>
       </div>
@@ -402,5 +593,62 @@ const s: Record<string, React.CSSProperties> = {
     height: 120,
     borderRadius: 12,
     background: 'rgba(255,255,255,0.04)',
+  },
+  emptyState: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 120,
+    borderRadius: 12,
+    border: '1px dashed rgba(255,255,255,0.1)',
+    background: 'rgba(255,255,255,0.02)',
+    padding: '2rem',
+  },
+  emptyText: {
+    color: '#64748b',
+    fontSize: '0.9rem',
+    textAlign: 'center' as const,
+    margin: 0,
+  },
+  comparisonBars: {
+    display: 'flex',
+    flexDirection: 'column' as const,
+    gap: '0.75rem',
+    marginTop: '1.5rem',
+  },
+  comparisonRow: {
+    display: 'grid',
+    gridTemplateColumns: '90px 1fr 100px',
+    alignItems: 'center',
+    gap: '1rem',
+  },
+  comparisonLabel: {
+    fontSize: '0.875rem',
+    fontWeight: 600,
+    color: '#cbd5e1',
+  },
+  comparisonBarTrack: {
+    height: 12,
+    borderRadius: 999,
+    background: 'rgba(255,255,255,0.06)',
+    overflow: 'hidden',
+  },
+  comparisonBarReferred: {
+    height: '100%',
+    borderRadius: 999,
+    background: 'linear-gradient(90deg, #3b82f6, #6366f1)',
+    transition: 'width 0.6s ease',
+  },
+  comparisonBarOrganic: {
+    height: '100%',
+    borderRadius: 999,
+    background: 'linear-gradient(90deg, #34d399, #10b981)',
+    transition: 'width 0.6s ease',
+  },
+  comparisonValue: {
+    fontSize: '0.875rem',
+    color: '#f1f5f9',
+    textAlign: 'right' as const,
+    fontWeight: 600,
   },
 };

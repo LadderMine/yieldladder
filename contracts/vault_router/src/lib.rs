@@ -2,7 +2,7 @@
 
 use soroban_sdk::{
     contract, contractimpl, contracttype, panic_with_error, token, Address, Env, IntoVal, Symbol,
-    Val, Vec,
+    Val, Vec, symbol_short,
 };
 
 mod error;
@@ -36,6 +36,20 @@ pub struct Position {
     pub principal: i128,
     pub shares: i128,
     pub lock_until: u32,
+}
+
+// ---------------------------------------------------------------------------
+// Events
+// ---------------------------------------------------------------------------
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ReferralCredited {
+    pub referrer: Address,
+    pub referred: Address,
+    pub tier: Tier,
+    pub amount: i128,
+    pub ledger: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -82,11 +96,12 @@ impl VaultRouter {
         env.storage().instance().set(&DataKey::UsdcToken, &usdc_token);
     }
 
-    /// Route a deposit to the appropriate tier vault.
+    /// Route a deposit to the appropriate tier vault, with optional referrer.
     ///
     /// Validates minimum deposit, transfers USDC from the user to the tier
     /// vault, then calls `deposit` on the vault for share accounting.
-    pub fn deposit(env: Env, user: Address, tier: Tier, amount: i128) {
+    /// If a referrer is provided, emits a ReferralCredited event.
+    pub fn deposit(env: Env, user: Address, tier: Tier, amount: i128, referrer: Option<Address>) {
         user.require_auth();
 
         let min_amt = min_deposit(&tier);
@@ -99,8 +114,24 @@ impl VaultRouter {
 
         token::Client::new(&env, &usdc).transfer(&user, &vault, &amount);
 
-        let args: Vec<Val> = (user, amount).into_val(&env);
+        let args: Vec<Val> = (user.clone(), amount).into_val(&env);
         env.invoke_contract::<()>(&vault, &Symbol::new(&env, "deposit"), args);
+
+        // If referrer is provided, emit ReferralCredited event
+        if let Some(referrer_addr) = referrer {
+            if referrer_addr != user {
+                env.events().publish(
+                    (symbol_short!("ReferralCredited"),),
+                    ReferralCredited {
+                        referrer: referrer_addr,
+                        referred: user,
+                        tier: tier.clone(),
+                        amount,
+                        ledger: env.ledger().sequence(),
+                    },
+                );
+            }
+        }
     }
 
     /// Withdraw from the chosen tier vault after the lock period has elapsed.

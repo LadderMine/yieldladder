@@ -25,6 +25,7 @@ function lockExpiry(lockMonths: number): string {
 function DepositFlow() {
   const params = useSearchParams();
   const paramTier = params.get('tier') as TierId | null;
+  const paramReferrer = params.get('ref') || params.get('referrer');
 
   const [step, setStep] = useState<Step>(1);
   const [tierId, setTierId] = useState<TierId>(paramTier ?? 'flex');
@@ -34,7 +35,23 @@ function DepositFlow() {
 
   useEffect(() => {
     if (paramTier) setTierId(paramTier);
-  }, [paramTier]);
+    
+    // Track referrer and visit count if ref param exists
+    if (paramReferrer) {
+      // Store referrer in localStorage for use during deposit
+      localStorage.setItem('yieldladder:referrer', paramReferrer);
+      
+      // Track visit count (per referrer or overall)
+      const visitKey = `yieldladder:visits:${paramReferrer}`;
+      const currentVisits = parseInt(localStorage.getItem(visitKey) || '0', 10);
+      localStorage.setItem(visitKey, (currentVisits + 1).toString());
+      
+      // Also track overall visits
+      const overallVisitKey = 'yieldladder:visits:overall';
+      const overallVisits = parseInt(localStorage.getItem(overallVisitKey) || '0', 10);
+      localStorage.setItem(overallVisitKey, (overallVisits + 1).toString());
+    }
+  }, [paramTier, paramReferrer]);
 
   const tier = TIERS.find((t) => t.id === tierId)!;
   const amountNum = parseFloat(amount) || 0;
