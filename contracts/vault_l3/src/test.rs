@@ -25,16 +25,13 @@ fn test_deposit_and_shares() {
 
     env.mock_all_auths();
 
-    // Min deposit: 50 USDC (500_000_000 stroops)
     let amount = 500_000_000;
     client.deposit(&user, &amount);
 
-    // Check multiplier 1.05x -> 525,000,000 shares
     assert_eq!(client.shares(&user), 525_000_000);
     assert_eq!(client.balance(&user), amount);
     assert_eq!(client.total_shares(), 525_000_000);
 
-    // Check lock_until
     let expected_lock = env.ledger().sequence() + 777_600;
     assert_eq!(client.lock_until(&user), expected_lock);
 }
@@ -47,7 +44,6 @@ fn test_deposit_below_min() {
 
     env.mock_all_auths();
 
-    // Less than 50 USDC
     let amount = 499_999_999;
     client.deposit(&user, &amount);
 }
@@ -63,7 +59,6 @@ fn test_withdraw_early_fails() {
     let amount = 500_000_000;
     client.deposit(&user, &amount);
 
-    // Try withdrawing immediately
     client.withdraw(&user);
 }
 
@@ -77,7 +72,6 @@ fn test_withdraw_maturity() {
     let amount = 500_000_000;
     client.deposit(&user, &amount);
 
-    // Fast forward ledger past lock_duration
     let current_seq = env.ledger().sequence();
     env.ledger().set_sequence(current_seq + 777_600);
 
@@ -98,11 +92,72 @@ fn test_early_exit_fee() {
     let amount = 500_000_000;
     client.deposit(&user, &amount);
 
-    // Early exit before maturity
-    // Fee is 0.50% of 500,000,000 = 2,500,000
-    // Net = 497,500,000
     let returned = client.early_exit(&user);
     assert_eq!(returned, 497_500_000);
     assert_eq!(client.shares(&user), 0);
     assert_eq!(client.balance(&user), 0);
+}
+
+// ── relock tests ────────────────────────────────────────────────────────────
+
+#[test]
+fn test_relock_at_maturity_sets_new_lock_until() {
+    let (env, client, _admin, _strategy, _usdc) = setup();
+    let user = Address::generate(&env);
+
+    env.mock_all_auths();
+
+    let amount = 500_000_000;
+    client.deposit(&user, &amount);
+
+    // Fast-forward exactly to maturity
+    let deposit_seq = env.ledger().sequence();
+    env.ledger().set_sequence(deposit_seq + 777_600);
+
+    let new_lock = client.relock(&user);
+    let expected = env.ledger().sequence() + 777_600;
+    assert_eq!(new_lock, expected);
+    assert_eq!(client.lock_until(&user), expected);
+}
+
+#[test]
+fn test_relock_does_not_change_balance_or_shares() {
+    let (env, client, _admin, _strategy, _usdc) = setup();
+    let user = Address::generate(&env);
+
+    env.mock_all_auths();
+
+    let amount = 500_000_000;
+    client.deposit(&user, &amount);
+
+    let shares_before = client.shares(&user);
+    let balance_before = client.balance(&user);
+    let total_before = client.total_shares();
+
+    let deposit_seq = env.ledger().sequence();
+    env.ledger().set_sequence(deposit_seq + 777_600);
+
+    client.relock(&user);
+
+    assert_eq!(client.shares(&user), shares_before);
+    assert_eq!(client.balance(&user), balance_before);
+    assert_eq!(client.total_shares(), total_before);
+}
+
+#[test]
+#[should_panic(expected = "NotYetMatured")]
+fn test_relock_before_maturity_is_rejected() {
+    let (env, client, _admin, _strategy, _usdc) = setup();
+    let user = Address::generate(&env);
+
+    env.mock_all_auths();
+
+    let amount = 500_000_000;
+    client.deposit(&user, &amount);
+
+    // Try to relock while still locked (one ledger before maturity)
+    let deposit_seq = env.ledger().sequence();
+    env.ledger().set_sequence(deposit_seq + 777_599);
+
+    client.relock(&user);
 }
