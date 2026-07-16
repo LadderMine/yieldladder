@@ -86,7 +86,8 @@ impl VaultRouter {
     ///
     /// Validates minimum deposit, transfers USDC from the user to the tier
     /// vault, then calls `deposit` on the vault for share accounting.
-    pub fn deposit(env: Env, user: Address, tier: Tier, amount: i128) {
+    /// Returns the position_id for locked tiers.
+    pub fn deposit(env: Env, user: Address, tier: Tier, amount: i128) -> u32 {
         user.require_auth();
 
         let min_amt = min_deposit(&tier);
@@ -100,7 +101,7 @@ impl VaultRouter {
         token::Client::new(&env, &usdc).transfer(&user, &vault, &amount);
 
         let args: Vec<Val> = (user, amount).into_val(&env);
-        env.invoke_contract::<()>(&vault, &Symbol::new(&env, "deposit"), args);
+        env.invoke_contract::<u32>(&vault, &Symbol::new(&env, "deposit"), args)
     }
 
     /// Withdraw from the chosen tier vault after the lock period has elapsed.
@@ -108,13 +109,13 @@ impl VaultRouter {
     /// The tier vault enforces the lock expiry check and surfaces
     /// `VaultError::LockNotExpired` on early attempts. On success, payout
     /// USDC is transferred from the vault to the user.
-    pub fn withdraw(env: Env, user: Address, tier: Tier) {
+    pub fn withdraw(env: Env, user: Address, tier: Tier, position_id: u32) {
         user.require_auth();
 
         let vault = vault_addr(&env, &tier);
         let usdc: Address = env.storage().instance().get(&DataKey::UsdcToken).unwrap();
 
-        let args: Vec<Val> = (user.clone(),).into_val(&env);
+        let args: Vec<Val> = (user.clone(), position_id).into_val(&env);
         let payout: i128 = env.invoke_contract(&vault, &Symbol::new(&env, "withdraw"), args);
 
         if payout > 0 {
@@ -123,13 +124,13 @@ impl VaultRouter {
     }
 
     /// Exit a locked tier early, accepting the exit fee deducted by the vault.
-    pub fn early_exit(env: Env, user: Address, tier: Tier) {
+    pub fn early_exit(env: Env, user: Address, tier: Tier, position_id: u32) {
         user.require_auth();
 
         let vault = vault_addr(&env, &tier);
         let usdc: Address = env.storage().instance().get(&DataKey::UsdcToken).unwrap();
 
-        let args: Vec<Val> = (user.clone(),).into_val(&env);
+        let args: Vec<Val> = (user.clone(), position_id).into_val(&env);
         let net: i128 = env.invoke_contract(&vault, &Symbol::new(&env, "early_exit"), args);
 
         if net > 0 {
@@ -217,11 +218,13 @@ mod test {
 
     #[contractimpl]
     impl MockVault {
-        pub fn deposit(_env: Env, _user: Address, _amount: i128) {}
-        pub fn withdraw(_env: Env, _user: Address) -> i128 {
+        pub fn deposit(_env: Env, _user: Address, _amount: i128) -> u32 {
+            0
+        }
+        pub fn withdraw(_env: Env, _user: Address, _position_id: u32) -> i128 {
             500_000_000_i128
         }
-        pub fn early_exit(_env: Env, _user: Address) -> i128 {
+        pub fn early_exit(_env: Env, _user: Address, _position_id: u32) -> i128 {
             497_500_000_i128
         }
         pub fn balance(_env: Env, _user: Address) -> i128 {
@@ -356,14 +359,14 @@ mod test {
     fn test_withdraw_routes_to_vault() {
         let (env, client, _) = setup();
         let user = Address::generate(&env);
-        client.withdraw(&user, &Tier::L3);
+        client.withdraw(&user, &Tier::L3, &0);
     }
 
     #[test]
     fn test_early_exit_routes_to_vault() {
         let (env, client, _) = setup();
         let user = Address::generate(&env);
-        client.early_exit(&user, &Tier::L6);
+        client.early_exit(&user, &Tier::L6, &0);
     }
 
     // ── Helper min-deposit validation ───────────────────────────────────────
