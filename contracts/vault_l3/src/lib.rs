@@ -6,8 +6,9 @@ use soroban_sdk::{contract, contracterror, contractimpl, contracttype, panic_wit
 #[repr(u32)]
 pub enum VaultError {
     BelowMinDeposit = 2,
-    LockNotExpired = 3,
-    NotYetMatured = 4,
+    LockNotExpired  = 3,
+    NotYetMatured   = 4,
+    Unauthorized    = 5,
 }
 
 #[derive(Clone)]
@@ -19,8 +20,12 @@ pub enum DataKey {
     Checkpoint(Address),
     TotalShares,
     Admin,
+    Guardian,
     Strategy,
     Usdc,
+    /// Emergency unlock flag — when true, early_exit and withdraw skip
+    /// lock and fee enforcement so depositors can exit safely.
+    EmergencyUnlock,
 }
 
 // GF-01 internal mock: fixed-point math
@@ -38,13 +43,40 @@ pub struct VaultL3;
 
 #[contractimpl]
 impl VaultL3 {
-    pub fn initialize(env: Env, admin: Address, strategy: Address, usdc: Address) {
+    pub fn initialize(env: Env, admin: Address, guardian: Address, strategy: Address, usdc: Address) {
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&DataKey::Guardian, &guardian);
         env.storage().instance().set(&DataKey::Strategy, &strategy);
         env.storage().instance().set(&DataKey::Usdc, &usdc);
         env.storage().instance().set(&DataKey::TotalShares, &0i128);
+        env.storage().instance().set(&DataKey::EmergencyUnlock, &false);
     }
+
+    // ── Emergency Unlock ─────────────────────────────────────────────────────
+
+    /// Toggle the emergency unlock mode. Only the Guardian may call this.
+    /// When active: `early_exit` and `withdraw` skip lock checks and fees.
+    /// This flag is independent of any pause mechanism (NF-07).
+    pub fn set_emergency_unlock(env: Env, active: bool) {
+        let guardian: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Guardian)
+            .expect("not initialized");
+        guardian.require_auth();
+        env.storage().instance().set(&DataKey::EmergencyUnlock, &active);
+    }
+
+    /// Returns the current state of the emergency unlock flag.
+    pub fn emergency_unlock(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::EmergencyUnlock)
+            .unwrap_or(false)
+    }
+
+    // ── Core vault operations ─────────────────────────────────────────────────
 
     pub fn deposit(env: Env, user: Address, amount: i128) {
         user.require_auth();
@@ -81,9 +113,17 @@ impl VaultL3 {
     pub fn withdraw(env: Env, user: Address) -> i128 {
         user.require_auth();
 
-        let lock_until: u32 = env.storage().persistent().get(&DataKey::LockUntil(user.clone())).unwrap_or(0);
-        if env.ledger().sequence() < lock_until {
-            panic_with_error!(&env, VaultError::LockNotExpired);
+        let emergency: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::EmergencyUnlock)
+            .unwrap_or(false);
+
+        if !emergency {
+            let lock_until: u32 = env.storage().persistent().get(&DataKey::LockUntil(user.clone())).unwrap_or(0);
+            if env.ledger().sequence() < lock_until {
+                panic_with_error!(&env, VaultError::LockNotExpired);
+            }
         }
 
         let current_shares: i128 = env.storage().persistent().get(&DataKey::Shares(user.clone())).unwrap_or(0);
@@ -114,9 +154,20 @@ impl VaultL3 {
             return 0;
         }
 
-        let exit_fee_fp = 50_000;
-        let fee = mul_fp(principal, exit_fee_fp);
-        let net_amount = principal - fee;
+        let emergency: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::EmergencyUnlock)
+            .unwrap_or(false);
+
+        // During emergency unlock: no fee, no lock check — return full principal
+        let net_amount = if emergency {
+            principal
+        } else {
+            // Exit fee: 0.50% = 50_000 in FP_MULTIPLIER
+            let fee = mul_fp(principal, 50_000);
+            principal - fee
+        };
 
         let total_shares: i128 = env.storage().instance().get(&DataKey::TotalShares).unwrap_or(0);
         env.storage().instance().set(&DataKey::TotalShares, &(total_shares - current_shares));
