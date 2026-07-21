@@ -10,4 +10,6 @@ pub enum VaultError {
     LockNotExpired     = 3,
     AssetNotAllowed    = 4,
     DepositCapExceeded = 5,
+    ProtocolPaused     = 6,
+    Unauthorized       = 7,
 }
