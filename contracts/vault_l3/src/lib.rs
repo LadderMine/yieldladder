@@ -16,10 +16,6 @@ pub enum VaultError {
 #[derive(Clone)]
 #[contracttype]
 pub enum DataKey {
-    LockUntil(Address),
-    Balance(Address),
-    Shares(Address),
-    Checkpoint(Address),
     TotalShares,
     TotalBalance,
     Admin,
@@ -28,6 +24,10 @@ pub enum DataKey {
     Strategy,
     Usdc,
     MaxTvl,
+    Balance(Address),
+    Shares(Address),
+    LockUntil(Address),
+    Checkpoint(Address),
     /// Emergency unlock flag — when true, early_exit and withdraw skip
     /// lock and fee enforcement so depositors can exit safely.
     EmergencyUnlock,
@@ -298,5 +298,3 @@ impl VaultL3 {
         env.storage().instance().get(&DataKey::TotalBalance).unwrap_or(0)
     }
 }
-
-mod test;

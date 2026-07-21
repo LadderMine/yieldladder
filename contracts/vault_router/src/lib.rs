@@ -515,6 +515,17 @@ mod test {
         client.initialize(&admin, &vault, &vault, &vault, &vault, &vault, &vec![&env, usdc]);
     }
 
+    // ── Vault getter ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_get_vault_returns_registered_address() {
+        let (env, client, vault_id) = setup();
+        assert_eq!(client.get_vault(&Tier::Flex), vault_id);
+        assert_eq!(client.get_vault(&Tier::L3), vault_id);
+        assert_eq!(client.get_vault(&Tier::L6), vault_id);
+        assert_eq!(client.get_vault(&Tier::L12), vault_id);
+    }
+
     // ── Min deposit helper ──────────────────────────────────────────────────
 
     #[test]

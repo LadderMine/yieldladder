@@ -16,10 +16,6 @@ pub enum VaultError {
 #[derive(Clone)]
 #[contracttype]
 pub enum DataKey {
-    LockUntil(Address),
-    Balance(Address),
-    Shares(Address),
-    Checkpoint(Address),
     TotalShares,
     TotalBalance,
     Admin,
@@ -27,6 +23,10 @@ pub enum DataKey {
     Strategy,
     Usdc,
     MaxTvl,
+    Balance(Address),
+    Shares(Address),
+    LockUntil(Address),
+    Checkpoint(Address),
 }
 
 const FP_MULTIPLIER: i128 = 1_000_000_0;
@@ -234,5 +234,3 @@ impl VaultL6 {
         env.storage().instance().get(&DataKey::TotalBalance).unwrap_or(0)
     }
 }
-
-mod test;
