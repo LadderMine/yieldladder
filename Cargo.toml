@@ -8,7 +8,9 @@ members = [
     "contracts/strategy_vault",
     "contracts/harvester",
     "contracts/governance",
+    "contracts/guardian_multisig",
     "contracts/shared",
+    "contracts/position_token",
 ]
 resolver = "2"
 
