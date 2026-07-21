@@ -92,10 +92,6 @@ impl GuardianMultisig {
         // satisfy the check at runtime.
         let mut caller_confirmed = false;
         for owner in owners.iter() {
-            if env.mock_auths().is_empty() {
-                // In production the invoker is validated by soroban's auth engine;
-                // we attempt require_auth and break on the first one that passes.
-            }
             let _ = owner;
         }
         // In a real deployment, replace the loop above with:
