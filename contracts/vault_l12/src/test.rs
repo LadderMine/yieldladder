@@ -1,6 +1,5 @@
 #![cfg(test)]
 extern crate std;
-
 use super::*;
 use soroban_sdk::{testutils::{Address as _, Ledger}, Address, Env};
 
@@ -30,7 +29,6 @@ fn test_deposit_and_shares() {
     let amount = 2_500_000_000;
     client.deposit(&user, &amount);
 
-    // 1.30x multiplier
     assert_eq!(client.shares(&user), 3_250_000_000);
     assert_eq!(client.balance(&user), amount);
     assert_eq!(client.total_balance(), amount);
@@ -92,7 +90,7 @@ fn test_withdraw_early_fails() {
     let user = Address::generate(&env);
     env.mock_all_auths();
     client.deposit(&user, &2_500_000_000_i128);
-    client.withdraw(&user);
+    client.withdraw(&user, &2_500_000_000_i128);
 }
 
 #[test]
@@ -107,10 +105,60 @@ fn test_withdraw_at_maturity() {
     let seq = env.ledger().sequence();
     env.ledger().set_sequence(seq + 3_110_400);
 
-    let returned = client.withdraw(&user);
+    let returned = client.withdraw(&user, &amount);
     assert_eq!(returned, amount);
     assert_eq!(client.shares(&user), 0);
     assert_eq!(client.balance(&user), 0);
+}
+
+#[test]
+fn test_partial_withdraw_l12() {
+    let (env, client, _admin, _gov, _strategy, _usdc) = setup();
+    let user = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.deposit(&user, &5_000_000_000_i128);
+    env.ledger().set_sequence(env.ledger().sequence() + 3_110_400);
+
+    let returned = client.withdraw(&user, &2_500_000_000_i128);
+    assert_eq!(returned, 2_500_000_000);
+    assert_eq!(client.balance(&user), 2_500_000_000);
+    assert_eq!(client.total_balance(), 2_500_000_000);
+}
+
+#[test]
+#[should_panic(expected = "AmountExceedsBalance")]
+fn test_over_withdrawal_rejected_l12() {
+    let (env, client, _admin, _gov, _strategy, _usdc) = setup();
+    let user = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.deposit(&user, &2_500_000_000_i128);
+    env.ledger().set_sequence(env.ledger().sequence() + 3_110_400);
+    client.withdraw(&user, &2_500_000_001_i128);
+}
+
+#[test]
+fn test_partial_early_exit_l12_fee_on_amount_only() {
+    let (env, client, _admin, _gov, _strategy, _usdc) = setup();
+    let user = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.deposit(&user, &5_000_000_000_i128);
+    let net = client.early_exit(&user, &2_500_000_000_i128);
+    assert_eq!(net, 2_437_500_000);
+    assert_eq!(client.balance(&user), 2_500_000_000);
+}
+
+#[test]
+#[should_panic(expected = "AmountExceedsBalance")]
+fn test_over_early_exit_rejected_l12() {
+    let (env, client, _admin, _gov, _strategy, _usdc) = setup();
+    let user = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.deposit(&user, &2_500_000_000_i128);
+    client.early_exit(&user, &2_500_000_001_i128);
 }
 
 // ── relock tests ────────────────────────────────────────────────────────────
@@ -167,4 +215,15 @@ fn test_relock_before_maturity_is_rejected() {
     env.ledger().set_sequence(deposit_seq + 3_110_399);
 
     client.relock(&user);
+}
+
+#[test]
+#[should_panic(expected = "LockNotExpired")]
+fn test_withdraw_before_lock_fails_l12() {
+    let (env, client, _admin, _gov, _strategy, _usdc) = setup();
+    let user = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.deposit(&user, &2_500_000_000_i128);
+    client.withdraw(&user, &1_000_000_000_i128);
 }

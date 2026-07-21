@@ -5,11 +5,12 @@ use soroban_sdk::{contract, contracterror, contractimpl, contracttype, panic_wit
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum VaultError {
-    BelowMinDeposit    = 2,
-    LockNotExpired     = 3,
-    NotYetMatured      = 4,
-    DepositCapExceeded = 5,
-    Unauthorized       = 6,
+    BelowMinDeposit      = 2,
+    LockNotExpired       = 3,
+    NotYetMatured        = 4,
+    DepositCapExceeded   = 5,
+    Unauthorized         = 6,
+    AmountExceedsBalance = 7,
 }
 
 #[derive(Clone)]
@@ -67,16 +68,12 @@ impl VaultL3 {
         env.storage().instance().set(&DataKey::TotalShares, &0i128);
         env.storage().instance().set(&DataKey::TotalBalance, &0i128);
         env.storage().instance().set(&DataKey::EmergencyUnlock, &false);
-        // Use provided cap, falling back to DEFAULT_MAX_TVL if zero
         let cap = if max_tvl > 0 { max_tvl } else { DEFAULT_MAX_TVL };
         env.storage().instance().set(&DataKey::MaxTvl, &cap);
     }
 
     // ── Emergency Unlock ─────────────────────────────────────────────────────
 
-    /// Toggle the emergency unlock mode. Only the Guardian may call this.
-    /// When active: `early_exit` and `withdraw` skip lock checks and fees.
-    /// This flag is independent of any pause mechanism (NF-07).
     pub fn set_emergency_unlock(env: Env, active: bool) {
         let guardian: Address = env
             .storage()
@@ -87,7 +84,6 @@ impl VaultL3 {
         env.storage().instance().set(&DataKey::EmergencyUnlock, &active);
     }
 
-    /// Returns the current state of the emergency unlock flag.
     pub fn emergency_unlock(env: Env) -> bool {
         env.storage()
             .instance()
@@ -104,7 +100,6 @@ impl VaultL3 {
             panic_with_error!(&env, VaultError::BelowMinDeposit);
         }
 
-        // TVL cap check: reject if deposit would push total balance over max_tvl
         let total_balance: i128 = env.storage().instance().get(&DataKey::TotalBalance).unwrap_or(0);
         let max_tvl: i128 = env.storage().instance().get(&DataKey::MaxTvl).unwrap_or(DEFAULT_MAX_TVL);
         if total_balance + amount > max_tvl {
@@ -137,7 +132,13 @@ impl VaultL3 {
         env.storage().persistent().set(&DataKey::Checkpoint(user.clone()), &checkpoint);
     }
 
-    pub fn withdraw(env: Env, user: Address) -> i128 {
+    /// Withdraw `amount` from a matured position.
+    ///
+    /// - If `amount >= balance`: full withdrawal — storage entries removed.
+    /// - If `amount < balance`: partial withdrawal — burns proportional shares,
+    ///   reduces Balance/Shares, leaves LockUntil/Checkpoint untouched.
+    /// - If `amount > balance`: rejected with `AmountExceedsBalance`.
+    pub fn withdraw(env: Env, user: Address, amount: i128) -> i128 {
         user.require_auth();
 
         let emergency: bool = env
@@ -153,34 +154,52 @@ impl VaultL3 {
             }
         }
 
-        let current_shares: i128 = env.storage().persistent().get(&DataKey::Shares(user.clone())).unwrap_or(0);
-        let principal: i128 = env.storage().persistent().get(&DataKey::Balance(user.clone())).unwrap_or(0);
+        let balance: i128 = env.storage().persistent().get(&DataKey::Balance(user.clone())).unwrap_or(0);
+        let user_shares: i128 = env.storage().persistent().get(&DataKey::Shares(user.clone())).unwrap_or(0);
+        let total_shares: i128 = env.storage().instance().get(&DataKey::TotalShares).unwrap_or(0);
 
-        if current_shares == 0 {
-            return 0;
+        if amount > balance {
+            panic_with_error!(&env, VaultError::AmountExceedsBalance);
         }
 
-        let total_shares: i128 = env.storage().instance().get(&DataKey::TotalShares).unwrap_or(0);
+        if amount >= balance {
+            // Full withdrawal — remove storage entries
+            let total_balance: i128 = env.storage().instance().get(&DataKey::TotalBalance).unwrap_or(0);
+            env.storage().instance().set(&DataKey::TotalShares, &(total_shares - user_shares));
+            env.storage().instance().set(&DataKey::TotalBalance, &(total_balance - balance).max(0));
+            env.storage().persistent().remove(&DataKey::Balance(user.clone()));
+            env.storage().persistent().remove(&DataKey::Shares(user.clone()));
+            env.storage().persistent().remove(&DataKey::LockUntil(user.clone()));
+            env.storage().persistent().remove(&DataKey::Checkpoint(user.clone()));
+            return balance;
+        }
+
+        // Partial withdrawal — burn proportional shares
+        let shares_to_burn = (user_shares * amount) / balance;
         let total_balance: i128 = env.storage().instance().get(&DataKey::TotalBalance).unwrap_or(0);
-        env.storage().instance().set(&DataKey::TotalShares, &(total_shares - current_shares));
-        env.storage().instance().set(&DataKey::TotalBalance, &(total_balance - principal).max(0));
+        env.storage().persistent().set(&DataKey::Balance(user.clone()), &(balance - amount));
+        env.storage().persistent().set(&DataKey::Shares(user.clone()), &(user_shares - shares_to_burn));
+        env.storage().instance().set(&DataKey::TotalShares, &(total_shares - shares_to_burn));
+        env.storage().instance().set(&DataKey::TotalBalance, &(total_balance - amount));
 
-        env.storage().persistent().remove(&DataKey::Balance(user.clone()));
-        env.storage().persistent().remove(&DataKey::Shares(user.clone()));
-        env.storage().persistent().remove(&DataKey::LockUntil(user.clone()));
-        env.storage().persistent().remove(&DataKey::Checkpoint(user.clone()));
-
-        principal
+        amount
     }
 
-    pub fn early_exit(env: Env, user: Address) -> i128 {
+    /// Early exit `amount` before maturity, applying the exit fee only to the
+    /// withdrawn amount.
+    ///
+    /// - If `amount >= balance`: full early exit.
+    /// - If `amount < balance`: partial early exit, remainder stays.
+    /// - If `amount > balance`: rejected with `AmountExceedsBalance`.
+    pub fn early_exit(env: Env, user: Address, amount: i128) -> i128 {
         user.require_auth();
 
-        let current_shares: i128 = env.storage().persistent().get(&DataKey::Shares(user.clone())).unwrap_or(0);
-        let principal: i128 = env.storage().persistent().get(&DataKey::Balance(user.clone())).unwrap_or(0);
+        let balance: i128 = env.storage().persistent().get(&DataKey::Balance(user.clone())).unwrap_or(0);
+        let user_shares: i128 = env.storage().persistent().get(&DataKey::Shares(user.clone())).unwrap_or(0);
+        let total_shares: i128 = env.storage().instance().get(&DataKey::TotalShares).unwrap_or(0);
 
-        if current_shares == 0 {
-            return 0;
+        if amount > balance {
+            panic_with_error!(&env, VaultError::AmountExceedsBalance);
         }
 
         let emergency: bool = env
@@ -189,31 +208,39 @@ impl VaultL3 {
             .get(&DataKey::EmergencyUnlock)
             .unwrap_or(false);
 
-        // During emergency unlock: no fee, no lock check — return full principal
+        // Exit fee: 0.50% on the withdrawn amount only
+        let exit_fee_fp = 50_000;
         let net_amount = if emergency {
-            principal
+            amount
         } else {
-            // Exit fee: 0.50% = 50_000 in FP_MULTIPLIER
-            let fee = mul_fp(principal, 50_000);
-            principal - fee
+            let fee = mul_fp(amount, exit_fee_fp);
+            amount - fee
         };
 
-        let total_shares: i128 = env.storage().instance().get(&DataKey::TotalShares).unwrap_or(0);
-        let total_balance: i128 = env.storage().instance().get(&DataKey::TotalBalance).unwrap_or(0);
-        env.storage().instance().set(&DataKey::TotalShares, &(total_shares - current_shares));
-        env.storage().instance().set(&DataKey::TotalBalance, &(total_balance - principal).max(0));
+        if amount >= balance {
+            // Full early exit
+            let total_balance: i128 = env.storage().instance().get(&DataKey::TotalBalance).unwrap_or(0);
+            env.storage().instance().set(&DataKey::TotalShares, &(total_shares - user_shares));
+            env.storage().instance().set(&DataKey::TotalBalance, &(total_balance - balance).max(0));
+            env.storage().persistent().remove(&DataKey::Balance(user.clone()));
+            env.storage().persistent().remove(&DataKey::Shares(user.clone()));
+            env.storage().persistent().remove(&DataKey::LockUntil(user.clone()));
+            env.storage().persistent().remove(&DataKey::Checkpoint(user.clone()));
+            return net_amount;
+        }
 
-        env.storage().persistent().remove(&DataKey::Balance(user.clone()));
-        env.storage().persistent().remove(&DataKey::Shares(user.clone()));
-        env.storage().persistent().remove(&DataKey::LockUntil(user.clone()));
-        env.storage().persistent().remove(&DataKey::Checkpoint(user.clone()));
+        // Partial early exit
+        let shares_to_burn = (user_shares * amount) / balance;
+        let total_balance: i128 = env.storage().instance().get(&DataKey::TotalBalance).unwrap_or(0);
+        env.storage().persistent().set(&DataKey::Balance(user.clone()), &(balance - amount));
+        env.storage().persistent().set(&DataKey::Shares(user.clone()), &(user_shares - shares_to_burn));
+        env.storage().instance().set(&DataKey::TotalShares, &(total_shares - shares_to_burn));
+        env.storage().instance().set(&DataKey::TotalBalance, &(total_balance - amount));
 
         net_amount
     }
 
     /// Update the max TVL cap. Only callable by the registered Governance address.
-    /// Lowering the cap below current TVL does not affect existing depositors —
-    /// it only prevents new deposits that would exceed the new cap.
     pub fn set_max_tvl(env: Env, new_cap: i128) {
         let governance: Address = env.storage().instance().get(&DataKey::Governance).unwrap();
         governance.require_auth();
@@ -230,13 +257,6 @@ impl VaultL3 {
         (max_tvl - total_balance).max(0)
     }
 
-    /// Renew the lock on a matured position without touching Balance or Shares.
-    ///
-    /// Callable only when `current_ledger >= lock_until` (position has matured).
-    /// Resets `lock_until = current_ledger + LOCK_DURATION` in place.
-    /// No USDC transfer occurs — this is a pure lock-extension.
-    ///
-    /// Returns the new `lock_until` ledger sequence number.
     pub fn relock(env: Env, user: Address) -> u32 {
         user.require_auth();
 
@@ -246,7 +266,6 @@ impl VaultL3 {
             .get(&DataKey::LockUntil(user.clone()))
             .unwrap_or(0);
 
-        // Reject if the position has not yet reached maturity
         if env.ledger().sequence() < lock_until {
             panic_with_error!(&env, VaultError::NotYetMatured);
         }

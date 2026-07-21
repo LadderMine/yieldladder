@@ -120,14 +120,16 @@ impl VaultRouter {
         env.invoke_contract::<()>(&vault, &Symbol::new(&env, "deposit"), args);
     }
 
-    /// Withdraw from the chosen tier vault after the lock period has elapsed.
-    /// `asset` specifies which asset position to withdraw.
-    pub fn withdraw(env: Env, user: Address, tier: Tier, asset: Address) {
+    /// Withdraw `amount` from the chosen tier vault for a specific asset.
+    ///
+    /// Pass the full balance to perform a full withdrawal.
+    /// Pass a smaller value to perform a partial withdrawal — the remainder stays.
+    pub fn withdraw(env: Env, user: Address, tier: Tier, asset: Address, amount: i128) {
         user.require_auth();
 
         let vault = vault_addr(&env, &tier);
 
-        let args: Vec<Val> = (user.clone(), asset.clone()).into_val(&env);
+        let args: Vec<Val> = (user.clone(), asset.clone(), amount).into_val(&env);
         let payout: i128 = env.invoke_contract(&vault, &Symbol::new(&env, "withdraw"), args);
 
         if payout > 0 {
@@ -136,12 +138,14 @@ impl VaultRouter {
     }
 
     /// Exit a locked tier early for a specific asset position.
-    pub fn early_exit(env: Env, user: Address, tier: Tier, asset: Address) {
+    ///
+    /// Early exit `amount` — exit fee applied only to the withdrawn amount.
+    pub fn early_exit(env: Env, user: Address, tier: Tier, asset: Address, amount: i128) {
         user.require_auth();
 
         let vault = vault_addr(&env, &tier);
 
-        let args: Vec<Val> = (user.clone(), asset.clone()).into_val(&env);
+        let args: Vec<Val> = (user.clone(), asset.clone(), amount).into_val(&env);
         let net: i128 = env.invoke_contract(&vault, &Symbol::new(&env, "early_exit"), args);
 
         if net > 0 {
@@ -284,8 +288,8 @@ mod test {
     #[contractimpl]
     impl MockVault {
         pub fn deposit(_env: Env, _user: Address, _asset: Address, _amount: i128) {}
-        pub fn withdraw(_env: Env, _user: Address, _asset: Address) -> i128 { 500_000_000_i128 }
-        pub fn early_exit(_env: Env, _user: Address, _asset: Address) -> i128 { 497_500_000_i128 }
+        pub fn withdraw(_env: Env, _user: Address, _asset: Address, _amount: i128) -> i128 { 500_000_000_i128 }
+        pub fn early_exit(_env: Env, _user: Address, _asset: Address, _amount: i128) -> i128 { 497_500_000_i128 }
         pub fn balance(_env: Env, _user: Address, _asset: Address) -> i128 { 500_000_000_i128 }
         pub fn shares(_env: Env, _user: Address, _asset: Address) -> i128 { 525_000_000_i128 }
         pub fn lock_until(_env: Env, _user: Address, _asset: Address) -> u32 { 1_000_000_u32 }
@@ -397,6 +401,31 @@ mod test {
         client.deposit(&user, &Tier::L12, &usdc, &(MIN_L12 - 1));
     }
 
+    // ── Partial withdrawal routing ──────────────────────────────────────────
+
+    #[test]
+    fn test_withdraw_routes_to_tier_with_amount() {
+        let (env, client, _, usdc) = setup();
+        let user = Address::generate(&env);
+        client.withdraw(&user, &Tier::L3, &usdc, &250_000_000_i128);
+    }
+
+    #[test]
+    fn test_early_exit_routes_to_tier_with_amount() {
+        let (env, client, _, usdc) = setup();
+        let user = Address::generate(&env);
+        client.early_exit(&user, &Tier::L6, &usdc, &500_000_000_i128);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_nonexistent_tier_panics() {
+        let (env, client, _, usdc) = setup();
+        let user = Address::generate(&env);
+        // Trying to deposit to a non-existent tier should fail
+        client.withdraw(&user, &Tier::Flex, &usdc, &100_i128);
+    }
+
     // ── Relock passthrough ──────────────────────────────────────────────────
 
     #[test]
@@ -431,6 +460,8 @@ mod test {
         client.relock(&user, &Tier::Flex);
     }
 
+    // ── TVL cap management ──────────────────────────────────────────────────
+
     #[test]
     fn test_set_max_tvl_via_router() {
         let (env, client, _, _) = setup();
@@ -444,6 +475,8 @@ mod test {
         assert_eq!(cap.max_tvl, 10_000_000_000_i128);
         assert_eq!(cap.remaining, 9_500_000_000_i128);
     }
+
+    // ── Position queries ────────────────────────────────────────────────────
 
     #[test]
     fn test_position_locked_tier() {

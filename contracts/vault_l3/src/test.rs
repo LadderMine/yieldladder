@@ -22,7 +22,6 @@ fn setup_with_cap(cap: i128) -> (Env, VaultL3Client<'static>, Address, Address, 
 }
 
 fn setup() -> (Env, VaultL3Client<'static>, Address, Address, Address, Address, Address) {
-    // 10,000 USDC default cap for most tests
     setup_with_cap(100_000_000_000)
 }
 
@@ -56,22 +55,19 @@ fn test_deposit_below_min() {
 #[test]
 #[should_panic(expected = "DepositCapExceeded")]
 fn test_deposit_above_cap_rejected() {
-    // Cap: exactly 1,000 USDC
     let (env, client, _admin, _gov, _guardian, _strategy, _usdc) = setup_with_cap(10_000_000_000);
     let user = Address::generate(&env);
     env.mock_all_auths();
 
-    // First deposit fills cap
     client.deposit(&user, &10_000_000_000_i128);
 
-    // Second deposit would exceed it
     let user2 = Address::generate(&env);
     client.deposit(&user2, &500_000_000_i128);
 }
 
 #[test]
 fn test_deposit_exactly_at_cap_succeeds() {
-    let cap: i128 = 500_000_000; // 50 USDC == min deposit == cap
+    let cap: i128 = 500_000_000;
     let (env, client, _admin, _gov, _guardian, _strategy, _usdc) = setup_with_cap(cap);
     let user = Address::generate(&env);
     env.mock_all_auths();
@@ -82,7 +78,7 @@ fn test_deposit_exactly_at_cap_succeeds() {
 
 #[test]
 fn test_remaining_capacity_decreases_on_deposit() {
-    let cap: i128 = 2_000_000_000; // 200 USDC
+    let cap: i128 = 2_000_000_000;
     let (env, client, _admin, _gov, _guardian, _strategy, _usdc) = setup_with_cap(cap);
     let user = Address::generate(&env);
     env.mock_all_auths();
@@ -104,7 +100,6 @@ fn test_set_max_tvl_by_governance() {
 #[should_panic]
 fn test_set_max_tvl_by_non_governance_rejected() {
     let (_env, client, _admin, _gov, _guardian, _strategy, _usdc) = setup();
-    // Do NOT mock auths — call should fail without governance signature
     let new_cap: i128 = 500_000_000_000;
     client.set_max_tvl(&new_cap);
 }
@@ -116,13 +111,9 @@ fn test_lower_cap_does_not_affect_existing_depositors() {
     env.mock_all_auths();
 
     client.deposit(&user, &500_000_000_i128);
-
-    // Lower cap below current TVL
     client.set_max_tvl(&100_000_000_i128);
 
-    // Existing balance unchanged
     assert_eq!(client.balance(&user), 500_000_000);
-    // remaining_capacity is 0 (clamped)
     assert_eq!(client.remaining_capacity(), 0);
 }
 
@@ -134,9 +125,8 @@ fn test_withdraw_early_fails() {
     env.mock_all_auths();
 
     client.deposit(&user, &500_000_000i128);
-    // Advance only 1 ledger — lock is 777_600 ledgers
     env.ledger().with_mut(|l| l.sequence_number += 1);
-    client.withdraw(&user);
+    client.withdraw(&user, &500_000_000_i128);
 }
 
 #[test]
@@ -145,13 +135,59 @@ fn test_withdraw_at_maturity() {
     let user = Address::generate(&env);
     env.mock_all_auths();
 
-    client.deposit(&user, &500_000_000_i128);
+    client.deposit(&user, &500_000_000i128);
     let seq = env.ledger().sequence();
     env.ledger().set_sequence(seq + 777_600);
 
-    let returned = client.withdraw(&user);
+    let returned = client.withdraw(&user, &500_000_000_i128);
     assert_eq!(returned, 500_000_000);
     assert_eq!(client.total_balance(), 0);
+    assert_eq!(client.shares(&user), 0);
+    assert_eq!(client.balance(&user), 0);
+}
+
+#[test]
+fn test_partial_withdraw_reduces_position() {
+    let (env, client, _admin, _gov, _guardian, _strategy, _usdc) = setup();
+    let user = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.deposit(&user, &1_000_000_000_i128);
+    env.ledger().set_sequence(env.ledger().sequence() + 777_600);
+
+    let returned = client.withdraw(&user, &500_000_000_i128);
+    assert_eq!(returned, 500_000_000);
+    assert_eq!(client.balance(&user), 500_000_000);
+    assert_eq!(client.total_balance(), 500_000_000);
+    assert!(client.lock_until(&user) > 0);
+}
+
+#[test]
+fn test_full_amount_partial_withdraw_equals_full_withdraw() {
+    let (env, client, _admin, _gov, _guardian, _strategy, _usdc) = setup();
+    let user = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.deposit(&user, &500_000_000_i128);
+    env.ledger().set_sequence(env.ledger().sequence() + 777_600);
+
+    let returned = client.withdraw(&user, &500_000_000_i128);
+    assert_eq!(returned, 500_000_000);
+    assert_eq!(client.balance(&user), 0);
+    assert_eq!(client.shares(&user), 0);
+    assert_eq!(client.lock_until(&user), 0);
+}
+
+#[test]
+#[should_panic(expected = "AmountExceedsBalance")]
+fn test_over_withdrawal_rejected() {
+    let (env, client, _admin, _gov, _guardian, _strategy, _usdc) = setup();
+    let user = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.deposit(&user, &500_000_000_i128);
+    env.ledger().set_sequence(env.ledger().sequence() + 777_600);
+    client.withdraw(&user, &500_000_001_i128);
 }
 
 #[test]
@@ -160,13 +196,35 @@ fn test_early_exit_charges_fee_normally() {
     let user = Address::generate(&env);
     env.mock_all_auths();
 
-    let amount = 1_000_000_000i128; // 100 USDC
+    let amount = 1_000_000_000i128;
     client.deposit(&user, &amount);
 
-    // Emergency unlock is off — 0.5% fee applies
-    let returned = client.early_exit(&user);
+    let returned = client.early_exit(&user, &amount);
     let expected_fee = (amount * 50_000) / 10_000_000;
     assert_eq!(returned, amount - expected_fee);
+}
+
+#[test]
+fn test_partial_early_exit_fee_on_withdrawn_amount_only() {
+    let (env, client, _admin, _gov, _guardian, _strategy, _usdc) = setup();
+    let user = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.deposit(&user, &1_000_000_000_i128);
+    let net = client.early_exit(&user, &500_000_000_i128);
+    assert_eq!(net, 497_500_000);
+    assert_eq!(client.balance(&user), 500_000_000);
+}
+
+#[test]
+#[should_panic(expected = "AmountExceedsBalance")]
+fn test_over_early_exit_rejected() {
+    let (env, client, _admin, _gov, _guardian, _strategy, _usdc) = setup();
+    let user = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.deposit(&user, &500_000_000_i128);
+    client.early_exit(&user, &500_000_001_i128);
 }
 
 // ── Emergency Unlock tests ────────────────────────────────────────────────────
@@ -201,11 +259,9 @@ fn test_early_exit_during_emergency_unlock_no_fee() {
     let amount = 1_000_000_000i128;
     client.deposit(&user, &amount);
 
-    // Activate emergency unlock BEFORE the lock expires
     client.set_emergency_unlock(&true);
 
-    // Should return full principal — no fee, no lock check
-    let returned = client.early_exit(&user);
+    let returned = client.early_exit(&user, &amount);
     assert_eq!(returned, amount);
 }
 
@@ -215,13 +271,11 @@ fn test_early_exit_during_emergency_unlock_no_fee() {
 fn test_relock_at_maturity_sets_new_lock_until() {
     let (env, client, _admin, _gov, _guardian, _strategy, _usdc) = setup();
     let user = Address::generate(&env);
-
     env.mock_all_auths();
 
     let amount = 500_000_000i128;
     client.deposit(&user, &amount);
 
-    // Fast-forward exactly to maturity
     let deposit_seq = env.ledger().sequence();
     env.ledger().with_mut(|l| l.sequence_number = deposit_seq + 777_600);
 
@@ -235,7 +289,6 @@ fn test_relock_at_maturity_sets_new_lock_until() {
 fn test_relock_does_not_change_balance_or_shares() {
     let (env, client, _admin, _gov, _guardian, _strategy, _usdc) = setup();
     let user = Address::generate(&env);
-
     env.mock_all_auths();
 
     let amount = 500_000_000i128;
@@ -260,13 +313,11 @@ fn test_relock_does_not_change_balance_or_shares() {
 fn test_relock_before_maturity_is_rejected() {
     let (env, client, _admin, _gov, _guardian, _strategy, _usdc) = setup();
     let user = Address::generate(&env);
-
     env.mock_all_auths();
 
     let amount = 500_000_000i128;
     client.deposit(&user, &amount);
 
-    // Try to relock while still locked (one ledger before maturity)
     let deposit_seq = env.ledger().sequence();
     env.ledger().with_mut(|l| l.sequence_number = deposit_seq + 777_599);
 
@@ -284,13 +335,10 @@ fn test_withdraw_during_emergency_unlock_skips_lock_check() {
     let amount = 500_000_000i128;
     client.deposit(&user, &amount);
 
-    // Lock has not expired yet
     env.ledger().with_mut(|l| l.sequence_number += 100);
-
     client.set_emergency_unlock(&true);
 
-    // Should succeed without LockNotExpired panic
-    let returned = client.withdraw(&user);
+    let returned = client.withdraw(&user, &amount);
     assert_eq!(returned, amount);
 }
 
@@ -303,11 +351,10 @@ fn test_fee_and_lock_enforced_after_emergency_deactivation() {
     let amount = 1_000_000_000i128;
     client.deposit(&user, &amount);
 
-    // Activate then deactivate — normal rules should resume
     client.set_emergency_unlock(&true);
     client.set_emergency_unlock(&false);
 
-    let returned = client.early_exit(&user);
+    let returned = client.early_exit(&user, &amount);
     let expected_fee = (amount * 50_000) / 10_000_000;
     assert_eq!(returned, amount - expected_fee);
 }
@@ -325,9 +372,19 @@ fn test_emergency_unlock_independent_of_balance_accounting() {
     let total_before  = client.total_shares();
 
     client.set_emergency_unlock(&true);
-    client.early_exit(&user);
+    client.early_exit(&user, &amount);
 
-    // Shares burned correctly
     assert_eq!(client.shares(&user), 0);
     assert_eq!(client.total_shares(), total_before - shares_before);
+}
+
+#[test]
+#[should_panic(expected = "LockNotExpired")]
+fn test_withdraw_before_lock_fails() {
+    let (env, client, _admin, _gov, _guardian, _strategy, _usdc) = setup();
+    let user = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.deposit(&user, &500_000_000_i128);
+    client.withdraw(&user, &100_000_000_i128);
 }
