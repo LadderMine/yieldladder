@@ -155,7 +155,10 @@ mod test {
     extern crate std;
 
     use super::VaultFlex;
-    use soroban_sdk::{testutils::Address as _, Address, Env};
+    use soroban_sdk::{
+        testutils::{Address as _, MockAuth, MockAuthInvoke},
+        Address, Env, IntoVal,
+    };
 
     fn setup() -> (Env, super::VaultFlexClient<'static>, Address, Address) {
         let env = Env::default();
@@ -287,5 +290,88 @@ mod test {
         let (env, client, admin, strategy) = setup();
         let _ = env;
         client.initialize(&admin, &strategy);
+    }
+
+    // ── Authorization boundary (issue #144) ─────────────────────────────────
+    //
+    // VaultFlex already gated deposit/withdraw on admin.require_auth() (the
+    // pattern the other three tier vaults were missing — see vault_l3's
+    // identical block). These tests make that explicit and committed rather
+    // than only established by inspection: mocking auth for `user` only,
+    // never `admin`, proves a caller cannot bypass VaultRouter by calling
+    // this vault directly.
+
+    fn setup_direct_call(env: &Env) -> (super::VaultFlexClient<'static>, Address, Address, Address) {
+        env.mock_all_auths();
+        let vault_id = env.register_contract(None, VaultFlex);
+        let client = super::VaultFlexClient::new(env, &vault_id);
+        let admin = Address::generate(env);
+        let strategy = Address::generate(env);
+        let usdc = Address::generate(env);
+        client.initialize(&admin, &strategy);
+        (client, vault_id, usdc, admin)
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_deposit_direct_call_without_router_auth_is_rejected() {
+        let env = Env::default();
+        let (client, vault_id, usdc, _admin) = setup_direct_call(&env);
+        let user = Address::generate(&env);
+        let amount = 50_000_000i128;
+
+        env.mock_auths(&[MockAuth {
+            address: &user,
+            invoke: &MockAuthInvoke {
+                contract: &vault_id,
+                fn_name: "deposit",
+                args: (user.clone(), usdc.clone(), amount).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.deposit(&user, &usdc, &amount);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_withdraw_direct_call_without_router_auth_is_rejected() {
+        let env = Env::default();
+        let (client, vault_id, usdc, _admin) = setup_direct_call(&env);
+        let user = Address::generate(&env);
+        client.deposit(&user, &usdc, &50_000_000i128);
+
+        env.mock_auths(&[MockAuth {
+            address: &user,
+            invoke: &MockAuthInvoke {
+                contract: &vault_id,
+                fn_name: "withdraw",
+                args: (user.clone(), usdc.clone(), 50_000_000i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.withdraw(&user, &usdc, &50_000_000i128);
+    }
+
+    #[test]
+    fn test_deposit_succeeds_with_admin_auth_only() {
+        let env = Env::default();
+        let (client, vault_id, usdc, admin) = setup_direct_call(&env);
+        let user = Address::generate(&env);
+        let amount = 50_000_000i128;
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &vault_id,
+                fn_name: "deposit",
+                args: (user.clone(), usdc.clone(), amount).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.deposit(&user, &usdc, &amount);
+        assert_eq!(client.balance(&user, &usdc), amount);
     }
 }
