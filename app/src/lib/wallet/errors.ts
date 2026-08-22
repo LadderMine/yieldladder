@@ -34,3 +34,37 @@ export class WalletUnavailableError extends Error {
     this.name = 'WalletUnavailableError';
   }
 }
+
+/**
+ * The wallet's `signTransaction` rejected for a reason that's neither a
+ * recognized decline nor a recognized disconnect (e.g. the extension
+ * itself errored internally). Mirrors the SDK's identical class
+ * (sdks/typescript/src/errors.ts) — nothing was ever submitted, so
+ * retrying is safe.
+ */
+export class WalletSigningFailedError extends Error {
+  readonly retryClassification: RetryClassification = 'retryable-safely';
+  constructor(readonly rawError: string) {
+    super('Signing failed. Please try again.');
+    this.name = 'WalletSigningFailedError';
+  }
+}
+
+/**
+ * The connected wallet's network doesn't match what the app targets
+ * (e.g. Freighter set to mainnet while the app targets testnet, or vice
+ * versa) — surfaced before the user attempts to sign, not discovered as
+ * an opaque submission failure (issue #143).
+ */
+export class WalletNetworkMismatchError extends Error {
+  readonly retryClassification: RetryClassification = 'retryable-safely';
+  constructor(
+    readonly expected: string,
+    readonly actual: string,
+  ) {
+    super(
+      `Your wallet is set to ${actual}, but this app runs on ${expected}. Switch networks in your wallet and reconnect.`,
+    );
+    this.name = 'WalletNetworkMismatchError';
+  }
+}

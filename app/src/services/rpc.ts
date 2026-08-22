@@ -141,6 +141,40 @@ export function getLatestLedger(): Promise<LedgerInfo> {
   return callRpc<LedgerInfo>('getLatestLedger');
 }
 
+// --- Fee stats (issue #143) --------------------------------------------
+//
+// A real per-transaction fee needs simulateTransaction against an actual
+// built transaction, which needs @stellar/stellar-sdk to construct — the
+// same blocked app-level dependency documented on placeholderSubmissionHash
+// in app/src/app/deposit/page.tsx. getFeeStats needs no transaction to
+// build at all: it's real, current, network-wide fee data straight from
+// the RPC endpoint, which is a genuinely better basis for a deposit-page
+// estimate than a hardcoded string, even though it isn't simulation of
+// this specific call. See lib/feeEstimate.ts for how it's presented
+// honestly as "recent network fees," not a per-transaction quote.
+
+export interface FeeDistribution {
+  max: string;
+  min: string;
+  mode: string;
+  p10: string;
+  p50?: string;
+  p90?: string;
+  p99: string;
+  transactionCount: string;
+  ledgerCount: number;
+}
+
+export interface FeeStatsResult {
+  sorobanInclusionFee: FeeDistribution;
+  inclusionFee: FeeDistribution;
+  latestLedger: number;
+}
+
+export function getFeeStats(): Promise<FeeStatsResult> {
+  return callRpc<FeeStatsResult>('getFeeStats');
+}
+
 // --- Transaction submission & confirmation (issue #141) ---------------
 //
 // There is currently no defined boundary anywhere between "the app

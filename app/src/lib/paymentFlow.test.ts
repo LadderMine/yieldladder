@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   classifyPaymentError,
   requestWalletSignature,
@@ -12,10 +12,14 @@ import {
 } from '../services/rpc';
 import {
   WalletDisconnectedError,
+  WalletNetworkMismatchError,
   WalletRejectedError,
   WalletUnavailableError,
 } from './wallet/errors';
 import { createIntent, markAwaitingSignature, beginSubmission, type StorageLike } from './paymentIntent';
+import * as sessionModule from './wallet/session';
+import * as adaptersModule from './wallet/adapters';
+import type { WalletAdapter } from './wallet/types';
 
 describe('classifyPaymentError (issue #142)', () => {
   it('classifies a wallet rejection as retryable-safely with the wallet message', () => {
@@ -72,9 +76,85 @@ describe('classifyPaymentError (issue #142)', () => {
   });
 });
 
-describe('requestWalletSignature', () => {
-  it('resolves (placeholder) so callers can await it like a real signing step', async () => {
+describe('requestWalletSignature (issue #143 — real wallet signing)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('no-ops when no xdr is given yet (still-blocked SDK wiring, see doc)', async () => {
     await expect(requestWalletSignature()).resolves.toBeUndefined();
+  });
+
+  it('throws WalletUnavailableError when no wallet session is connected', async () => {
+    vi.spyOn(sessionModule, 'loadSession').mockReturnValue(null);
+
+    await expect(requestWalletSignature('AAAAxdr')).rejects.toThrow(
+      WalletUnavailableError,
+    );
+  });
+
+  it('signs via the resolved adapter with the session account and network', async () => {
+    vi.spyOn(sessionModule, 'loadSession').mockReturnValue({
+      account: { publicKey: 'GADDR', network: 'testnet' },
+      provider: 'freighter',
+      connectedAt: Date.now(),
+    });
+    const signTransaction = vi.fn().mockResolvedValue('AAAAsigned');
+    const adapter: WalletAdapter = {
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      isConnected: vi.fn(),
+      signTransaction,
+    };
+    vi.spyOn(adaptersModule, 'getWalletAdapter').mockReturnValue(adapter);
+
+    await requestWalletSignature('AAAAxdr');
+
+    expect(signTransaction).toHaveBeenCalledWith('AAAAxdr', {
+      network: 'testnet',
+      accountToSign: 'GADDR',
+    });
+  });
+
+  it('checks the network before signing and throws WalletNetworkMismatchError without ever calling signTransaction', async () => {
+    vi.spyOn(sessionModule, 'loadSession').mockReturnValue({
+      account: { publicKey: 'GADDR', network: 'mainnet' },
+      provider: 'freighter',
+      connectedAt: Date.now(),
+    });
+    const signTransaction = vi.fn();
+    const adapter: WalletAdapter = {
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      isConnected: vi.fn(),
+      signTransaction,
+      checkNetwork: vi.fn().mockResolvedValue({ matches: false, actual: 'mainnet' }),
+    };
+    vi.spyOn(adaptersModule, 'getWalletAdapter').mockReturnValue(adapter);
+
+    await expect(requestWalletSignature('AAAAxdr')).rejects.toThrow(
+      WalletNetworkMismatchError,
+    );
+    expect(signTransaction).not.toHaveBeenCalled();
+  });
+
+  it('propagates a real WalletRejectedError thrown by the adapter', async () => {
+    vi.spyOn(sessionModule, 'loadSession').mockReturnValue({
+      account: { publicKey: 'GADDR', network: 'testnet' },
+      provider: 'freighter',
+      connectedAt: Date.now(),
+    });
+    const adapter: WalletAdapter = {
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      isConnected: vi.fn(),
+      signTransaction: vi.fn().mockRejectedValue(new WalletRejectedError()),
+    };
+    vi.spyOn(adaptersModule, 'getWalletAdapter').mockReturnValue(adapter);
+
+    await expect(requestWalletSignature('AAAAxdr')).rejects.toThrow(
+      WalletRejectedError,
+    );
   });
 });
 

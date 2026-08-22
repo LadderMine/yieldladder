@@ -13,6 +13,15 @@ import {
 } from '@/lib/paymentIntent';
 import { toast } from '@/lib/toast';
 import { runPaymentSubmission, defaultPaymentSubmissionDeps } from '@/lib/paymentFlow';
+import { estimateNetworkFee, type FeeEstimate } from '@/lib/feeEstimate';
+import {
+  checkUsdcTrustline,
+  AccountNotFoundError,
+  HorizonUnavailableError,
+} from '@/services/horizon';
+
+const USDC_ASSET_CODE = process.env.NEXT_PUBLIC_USDC_ASSET_CODE ?? 'USDC';
+const USDC_ISSUER = process.env.NEXT_PUBLIC_USDC_ISSUER;
 
 const TIERS = [
   { id: 'flex', label: 'Flex', lock: 'None', lockMonths: 0, multiplier: 1.0, multiplierLabel: '1.00x', exitFee: '0%', minDeposit: 1, apy: 4.2 },
@@ -22,8 +31,11 @@ const TIERS = [
 ] as const;
 
 type TierId = typeof TIERS[number]['id'];
-type Step = 1 | 2 | 3 | 4;
+// 3 (Trustline) is only ever visited when a check finds one missing —
+// otherwise step 2 -> 4 directly. See handleContinueFromAmount.
+type Step = 1 | 2 | 3 | 4 | 5;
 type TxStatus = 'pending' | 'confirmed' | 'failed' | 'expired';
+type TrustlineState = 'checking' | 'missing' | 'present' | 'unknown';
 
 function lockExpiry(lockMonths: number): string {
   if (lockMonths === 0) return 'No lock';
@@ -70,11 +82,28 @@ function DepositFlow() {
   const [txError, setTxError] = useState('');
   const [intent, setIntent] = useState<PaymentIntent | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [trustlineState, setTrustlineState] = useState<TrustlineState>('unknown');
+  const [trustlineError, setTrustlineError] = useState('');
+  const [feeEstimate, setFeeEstimate] = useState<FeeEstimate | null>(null);
 
   // Not gated behind a "must connect wallet" requirement (out of scope
   // here) — falls back to a placeholder so the idempotency key is still
   // well-formed if a user somehow reaches this page unconnected.
   const address = loadSession()?.account.publicKey ?? 'anonymous';
+
+  // Sourced from real, current network fee data (issue #143) — see
+  // lib/feeEstimate.ts for why this is an "up to" ceiling rather than a
+  // fixed per-transaction quote (that needs simulating this specific
+  // transaction, which is still blocked — see that file's doc).
+  useEffect(() => {
+    let cancelled = false;
+    estimateNetworkFee().then((estimate) => {
+      if (!cancelled) setFeeEstimate(estimate);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (paramTier) setTierId(paramTier);
@@ -88,7 +117,7 @@ function DepositFlow() {
     if (!active) return;
     setIntent(active);
     setAmount(active.amount);
-    setStep(4);
+    setStep(5);
     // findActiveIntent already excludes terminal states (confirmed/failed/
     // expired — see isTerminal), so a rehydrated intent is always
     // mid-flight; anything short of that bucket falls back to 'pending'.
@@ -106,15 +135,63 @@ function DepositFlow() {
     ? (amountNum * tier.apy / 100).toFixed(2)
     : (amountNum * tier.apy / 100 * (tier.lockMonths / 12)).toFixed(2);
   const shares = (amountNum * tier.multiplier).toFixed(0);
-  const estimatedFee = '0.00001 XLM';
 
   // Generated once per arrival at the confirm step (issue #140) — a fresh
-  // nonce every time, so re-entering step 3 with a changed amount/tier
-  // never silently reuses a stale key, while double-clicking Confirm on
-  // the SAME step-3 visit reuses the SAME intent.
-  function handleEnterConfirmStep() {
-    setIntent(createIntent('deposit', address, tierId, 'USDC', amount));
+  // nonce every time, so re-entering the confirm step with a changed
+  // amount/tier never silently reuses a stale key, while double-clicking
+  // Confirm on the SAME visit reuses the SAME intent.
+  function enterConfirmStep() {
+    setIntent(createIntent('deposit', address, tierId, USDC_ASSET_CODE, amount));
+    setStep(4);
+  }
+
+  // USDC trustline check (issue #143): run once when leaving the amount
+  // step, before the confirm step is ever reached, rather than letting a
+  // missing trustline surface as an opaque simulation failure at deposit
+  // time. A check failure (network down, account not yet funded) doesn't
+  // hard-block the flow — the user can retry the check or continue
+  // anyway, since the deposit itself will still fail cleanly through the
+  // normal error path if a trustline genuinely is missing.
+  async function handleContinueFromAmount() {
+    if (!USDC_ISSUER) {
+      // Not configured for this deployment yet — can't check, so don't
+      // pretend to. See services/horizon.ts's `configured` field.
+      enterConfirmStep();
+      return;
+    }
+
+    setTrustlineState('checking');
     setStep(3);
+    try {
+      const result = await checkUsdcTrustline(address, USDC_ASSET_CODE, USDC_ISSUER);
+      if (result.hasTrustline) {
+        enterConfirmStep();
+      } else {
+        setTrustlineState('missing');
+      }
+    } catch (err) {
+      setTrustlineState('unknown');
+      setTrustlineError(
+        err instanceof AccountNotFoundError
+          ? 'Your wallet account was not found on the network yet — it may need to be funded first.'
+          : err instanceof HorizonUnavailableError
+            ? "Couldn't check your trustline status — the network may be unreachable."
+            : err instanceof Error
+              ? err.message
+              : 'Could not check trustline status.',
+      );
+    }
+  }
+
+  async function handleRecheckTrustline() {
+    setTrustlineState('checking');
+    setTrustlineError('');
+    try {
+      const result = await checkUsdcTrustline(address, USDC_ASSET_CODE, USDC_ISSUER);
+      setTrustlineState(result.hasTrustline ? 'present' : 'missing');
+    } catch {
+      setTrustlineState('unknown');
+    }
   }
 
   async function handleConfirm() {
@@ -128,7 +205,7 @@ function DepositFlow() {
 
     setSubmitting(true);
     setIntent(started);
-    setStep(4);
+    setStep(5);
     setTxStatus('pending');
 
     const awaiting = markAwaitingSignature(started);
@@ -158,7 +235,7 @@ function DepositFlow() {
     // should not get a new nonce.
     setTxStatus(null);
     setTxError('');
-    setStep(3);
+    setStep(4);
   }
 
   return (
@@ -232,7 +309,7 @@ function DepositFlow() {
               style={belowMin || !amountNum ? s.btnDisabled : s.btnPrimary}
               type="button"
               disabled={belowMin || !amountNum}
-              onClick={handleEnterConfirmStep}
+              onClick={handleContinueFromAmount}
             >
               Continue
             </button>
@@ -240,8 +317,69 @@ function DepositFlow() {
         </div>
       )}
 
-      {/* Step 3 — Confirmation modal */}
+      {/* Step 3 — USDC trustline check (only reached when one is actually missing/unknown) */}
       {step === 3 && (
+        <div style={s.card}>
+          <h2 style={s.cardTitle}>USDC Trustline</h2>
+          {trustlineState === 'checking' && (
+            <>
+              <div style={s.spinner} aria-label="Loading" />
+              <p style={s.sub}>Checking your wallet for a USDC trustline…</p>
+            </>
+          )}
+          {trustlineState === 'missing' && (
+            <>
+              <p style={s.sub}>
+                Your wallet doesn&apos;t hold {USDC_ASSET_CODE} yet — Stellar
+                accounts need a one-time <strong>trustline</strong> before they
+                can hold an asset. This is a separate transaction from your
+                deposit, and it&apos;s something only your wallet can add.
+              </p>
+              <p style={s.sub}>
+                Add a {USDC_ASSET_CODE} trustline in your wallet (most wallets,
+                including Freighter, have an &quot;Add asset&quot; option), then
+                recheck below.
+              </p>
+              <div style={s.btnRow}>
+                <button style={s.btnSecondary} type="button" onClick={() => setStep(2)}>Back</button>
+                <button style={s.btnPrimary} type="button" onClick={handleRecheckTrustline}>
+                  I&apos;ve added it — Recheck
+                </button>
+              </div>
+            </>
+          )}
+          {trustlineState === 'present' && (
+            <>
+              <p style={s.sub}>Trustline found — you&apos;re all set.</p>
+              <div style={s.btnRow}>
+                <button style={s.btnSecondary} type="button" onClick={() => setStep(2)}>Back</button>
+                <button style={s.btnPrimary} type="button" onClick={enterConfirmStep}>
+                  Continue
+                </button>
+              </div>
+            </>
+          )}
+          {trustlineState === 'unknown' && (
+            <>
+              <p style={s.errText}>
+                {trustlineError || 'Could not check your trustline status.'}
+              </p>
+              <div style={s.btnRow}>
+                <button style={s.btnSecondary} type="button" onClick={() => setStep(2)}>Back</button>
+                <button style={s.btnSecondary} type="button" onClick={handleRecheckTrustline}>
+                  Retry check
+                </button>
+                <button style={s.btnPrimary} type="button" onClick={enterConfirmStep}>
+                  Continue anyway
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Step 4 — Confirmation */}
+      {step === 4 && (
         <div style={s.card}>
           <h2 style={s.cardTitle}>Confirm Deposit</h2>
           <dl style={s.dl}>
@@ -251,8 +389,20 @@ function DepositFlow() {
             <Row label="Shares minted" value={shares} />
             <Row label="Lock expiry" value={lockExpiry(tier.lockMonths)} />
             <Row label="Projected yield" value={`~${projectedYield} USDC`} />
-            <Row label="Estimated fee" value={estimatedFee} />
+            <Row
+              label="Estimated fee"
+              value={feeEstimate?.display ?? 'Loading…'}
+            />
           </dl>
+          {feeEstimate?.available && <p style={s.footnote}>{feeEstimate.note}</p>}
+          <p style={s.custodyNote}>
+            YieldLadder never takes custody of your funds. Depositing signs
+            and submits a transaction directly from your own wallet, and the
+            protocol is non-custodial and immutable — the only privileged
+            role (the Strategist) can propose pool allocations but can never
+            withdraw your funds. Every withdrawal, at maturity or via early
+            exit, requires your own wallet signature.
+          </p>
           <div style={s.btnRow}>
             <button style={s.btnSecondary} type="button" onClick={() => setStep(2)}>Back</button>
             <button
@@ -267,8 +417,8 @@ function DepositFlow() {
         </div>
       )}
 
-      {/* Step 4 — Transaction states */}
-      {step === 4 && (
+      {/* Step 5 — Transaction states */}
+      {step === 5 && (
         <div style={{ ...s.card, alignItems: 'center', textAlign: 'center' }}>
           {txStatus === 'pending' && (
             <>
@@ -319,7 +469,7 @@ function DepositFlow() {
 }
 
 function Stepper({ current }: { current: Step }) {
-  const labels = ['Select Tier', 'Amount', 'Confirm', 'Done'];
+  const labels = ['Select Tier', 'Amount', 'Trustline', 'Confirm', 'Done'];
   return (
     <div style={s.stepper} aria-label="Progress">
       {labels.map((label, i) => {
@@ -386,6 +536,17 @@ const s = {
   btnSecondary: { padding: '0.55rem 1.25rem', borderRadius: 6, border: 'none', background: '#1e293b', color: '#cbd5e1', fontWeight: 600, fontSize: '0.9rem', cursor: 'pointer' },
   btnDisabled: { padding: '0.55rem 1.25rem', borderRadius: 6, border: 'none', background: '#1e293b', color: '#475569', fontWeight: 600, fontSize: '0.9rem', cursor: 'not-allowed' as const },
   errText: { color: '#f87171', fontSize: '0.82rem' },
+  footnote: { color: '#64748b', fontSize: '0.75rem', margin: 0 },
+  custodyNote: {
+    color: '#94a3b8',
+    fontSize: '0.78rem',
+    lineHeight: 1.5,
+    background: '#0b1324',
+    border: '1px solid #1e293b',
+    borderRadius: 6,
+    padding: '0.6rem 0.75rem',
+    margin: 0,
+  },
   spinner: { width: 36, height: 36, border: '3px solid #1e293b', borderTop: '3px solid #3b82f6', borderRadius: '50%', animation: 'spin 0.8s linear infinite', margin: '1rem auto' },
   successIcon: { fontSize: '2.5rem', color: '#4ade80' },
   failIcon: { fontSize: '2.5rem', color: '#f87171' },
