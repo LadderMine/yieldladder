@@ -1,9 +1,10 @@
 // Shared payment-flow helpers used by both app/src/app/deposit/page.tsx and
-// app/src/components/EarlyExitModal.tsx (issue #142): the error taxonomy/
-// classification, the submit -> sign -> wait orchestration, and the
-// (still-placeholder, see requestWalletSignature's doc) wallet-signing
-// step — "give every payment operation a complete, typed failure taxonomy
-// and well-defined retry/recovery behavior."
+// app/src/components/EarlyExitModal.tsx: the error taxonomy/classification
+// (issue #142), the submit -> sign -> wait orchestration, and the real
+// wallet-signing step (issue #143, see requestWalletSignature's doc for
+// what's still blocked and why) — "give every payment operation a
+// complete, typed failure taxonomy and well-defined retry/recovery
+// behavior."
 
 import {
   RpcTimeoutError,
@@ -14,9 +15,14 @@ import {
 } from '../services/rpc';
 import {
   WalletDisconnectedError,
+  WalletNetworkMismatchError,
   WalletRejectedError,
+  WalletSigningFailedError,
   WalletUnavailableError,
 } from './wallet/errors';
+import { getWalletAdapter } from './wallet/adapters';
+import { loadSession } from './wallet/session';
+import { TARGET_NETWORK } from './wallet/network';
 import type { RetryClassification } from './retryClassification';
 import {
   markConfirmed,
@@ -43,6 +49,8 @@ export function classifyPaymentError(error: unknown): ClassifiedPaymentError {
     error instanceof WalletRejectedError ||
     error instanceof WalletDisconnectedError ||
     error instanceof WalletUnavailableError ||
+    error instanceof WalletSigningFailedError ||
+    error instanceof WalletNetworkMismatchError ||
     error instanceof RpcUnavailableError ||
     error instanceof RpcTimeoutError ||
     error instanceof TransactionFailedError ||
@@ -63,20 +71,45 @@ export function classifyPaymentError(error: unknown): ClassifiedPaymentError {
 }
 
 /**
- * TODO(#141 follow-up, same as placeholderSubmissionHash in
- * app/src/app/deposit/page.tsx): stands in for asking the connected wallet
- * (via sdks/typescript's `Signer` interface) to sign the built transaction,
- * until the app depends on the SDK directly — see that file's comment for
- * why that wiring is deferred. A real implementation can throw
- * WalletRejectedError/WalletDisconnectedError/WalletUnavailableError; this
- * placeholder never does, but is a distinct, separately-mockable function
- * specifically so tests can inject those failures through the real
- * call site and prove the classifier + UI react correctly (issue #142
- * acceptance criteria: failure states reachable via real, injected
- * failures, not just hardcoded/manual triggers).
+ * Real wallet-signing step (issue #143) — resolves the connected wallet's
+ * adapter (FreighterAdapter today; see wallet/adapters.ts) and asks it to
+ * sign `xdr`, checking the wallet's network first so a mismatch is
+ * surfaced as a typed WalletNetworkMismatchError rather than an opaque
+ * submission failure. Throws WalletUnavailableError/
+ * WalletNetworkMismatchError/WalletRejectedError/WalletDisconnectedError/
+ * WalletSigningFailedError — all real, reachable through this exact call
+ * site (paymentFlow.test.ts injects each via a mocked adapter/session).
+ *
+ * `xdr` is optional and a no-op when omitted: building the actual deposit/
+ * early-exit transaction (via sdks/typescript's YieldLadder, issue #139)
+ * is still blocked on the app depending on the SDK directly, which needs a
+ * `pnpm install` to regenerate app/pnpm-lock.yaml correctly — this
+ * environment can't safely run that (see placeholderSubmissionHash in
+ * app/src/app/deposit/page.tsx for the identical, already-documented
+ * blocker). The no-op path preserves today's callers unchanged; the moment
+ * a caller has a real XDR to pass, this exercises the complete real
+ * signing pipeline instead.
  */
-export async function requestWalletSignature(): Promise<void> {
-  // No-op placeholder — nothing to await yet.
+export async function requestWalletSignature(xdr?: string): Promise<void> {
+  if (!xdr) return;
+
+  const session = loadSession();
+  if (!session) {
+    throw new WalletUnavailableError();
+  }
+
+  const adapter = getWalletAdapter(session.provider);
+  if (adapter.checkNetwork) {
+    const { matches, actual } = await adapter.checkNetwork(TARGET_NETWORK);
+    if (!matches) {
+      throw new WalletNetworkMismatchError(TARGET_NETWORK, actual);
+    }
+  }
+
+  await adapter.signTransaction(xdr, {
+    network: session.account.network,
+    accountToSign: session.account.publicKey,
+  });
 }
 
 export interface PaymentSubmissionDeps {

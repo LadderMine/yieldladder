@@ -166,6 +166,24 @@ export default function EarlyExitModal({
             <strong>~{calc.opportunity.toFixed(2)} USDC</strong>
           </div>
         </div>
+        <p
+          style={{
+            color: '#64748b',
+            fontSize: '0.78rem',
+            lineHeight: 1.5,
+            background: '#f8fafc',
+            border: '1px solid #e2e8f0',
+            borderRadius: 6,
+            padding: '0.6rem 0.75rem',
+            marginTop: 12,
+          }}
+        >
+          YieldLadder never takes custody of your funds — exiting early signs
+          and submits a transaction directly from your own wallet. The
+          protocol is non-custodial: the Strategist can propose pool
+          allocations but can never withdraw your funds, and this exit only
+          happens because you authorize it with your own signature.
+        </p>
         {status === 'pending' && <p>Submitting transaction…</p>}
         {status === 'confirmed' && <p>Exit confirmed.</p>}
         {status === 'failed' && <p style={{ color: '#c33' }}>{error || 'An error occurred. Please try again.'}</p>}
