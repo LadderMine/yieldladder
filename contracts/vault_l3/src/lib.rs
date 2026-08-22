@@ -98,7 +98,8 @@ impl VaultL3 {
     /// moved the tokens from `user` to this contract before calling, so no
     /// token transfer happens here — this is bookkeeping only.
     pub fn deposit(env: Env, user: Address, asset: Address, amount: i128) {
-        user.require_auth();
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        admin.require_auth();
 
         if amount < 500_000_000 {
             panic_with_error!(&env, VaultError::BelowMinDeposit);
@@ -137,7 +138,8 @@ impl VaultL3 {
     ///   reduces Balance/Shares, leaves LockUntil/Checkpoint untouched.
     /// - If `amount > balance`: rejected with `AmountExceedsBalance`.
     pub fn withdraw(env: Env, user: Address, asset: Address, amount: i128) -> i128 {
-        user.require_auth();
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        admin.require_auth();
 
         let emergency: bool = env
             .storage()
@@ -190,7 +192,8 @@ impl VaultL3 {
     /// - If `amount < balance`: partial early exit, remainder stays.
     /// - If `amount > balance`: rejected with `AmountExceedsBalance`.
     pub fn early_exit(env: Env, user: Address, asset: Address, amount: i128) -> i128 {
-        user.require_auth();
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        admin.require_auth();
 
         let balance: i128 = env.storage().persistent().get(&DataKey::Balance(user.clone(), asset.clone())).unwrap_or(0);
         let user_shares: i128 = env.storage().persistent().get(&DataKey::Shares(user.clone(), asset.clone())).unwrap_or(0);
@@ -256,7 +259,8 @@ impl VaultL3 {
     }
 
     pub fn relock(env: Env, user: Address, asset: Address) -> u32 {
-        user.require_auth();
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        admin.require_auth();
 
         let lock_until: u32 = env
             .storage()
@@ -302,7 +306,10 @@ mod test {
     extern crate std;
 
     use super::VaultL3;
-    use soroban_sdk::{testutils::Address as _, Address, Env};
+    use soroban_sdk::{
+        testutils::{Address as _, MockAuth, MockAuthInvoke},
+        Address, Env, IntoVal,
+    };
 
     fn setup() -> (Env, super::VaultL3Client<'static>, Address, Address, Address) {
         let env = Env::default();
@@ -453,5 +460,145 @@ mod test {
         let user = Address::generate(&env);
         client.deposit(&user, &usdc, &500_000_000i128);
         client.relock(&user, &usdc);
+    }
+
+    // ── Authorization boundary (issue #144) ─────────────────────────────────
+    //
+    // Regression coverage for the router-bypass vulnerability: deposit/
+    // withdraw/early_exit/relock must gate on the registered Admin
+    // (VaultRouter), never on `user`. Before this fix they gated on
+    // `user.require_auth()`, which meant anyone holding only the user's own
+    // signature could call this vault directly — skipping VaultRouter's
+    // pause flag, its asset allowlist, and (most severely, for deposit)
+    // the actual token transfer VaultRouter performs before invoking the
+    // vault, letting a caller mint themselves shares/balance for free.
+    //
+    // Each test below mocks auth for `user` only, never `admin` — proving
+    // the vault itself enforces this boundary rather than merely relying
+    // on VaultRouter to have checked it upstream. Against the pre-fix code
+    // (which never checked `admin` at all) every one of these would have
+    // passed instead of panicking.
+
+    fn setup_direct_call(env: &Env) -> (super::VaultL3Client<'static>, Address, Address, Address) {
+        env.mock_all_auths();
+        let vault_id = env.register_contract(None, VaultL3);
+        let client = super::VaultL3Client::new(env, &vault_id);
+        let admin = Address::generate(env);
+        let governance = Address::generate(env);
+        let guardian = Address::generate(env);
+        let strategy = Address::generate(env);
+        let usdc = Address::generate(env);
+        client.initialize(&admin, &governance, &guardian, &strategy, &usdc, &0i128);
+        (client, vault_id, usdc, admin)
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_deposit_direct_call_without_router_auth_is_rejected() {
+        let env = Env::default();
+        let (client, vault_id, usdc, _admin) = setup_direct_call(&env);
+        let user = Address::generate(&env);
+        let amount = 500_000_000i128;
+
+        env.mock_auths(&[MockAuth {
+            address: &user,
+            invoke: &MockAuthInvoke {
+                contract: &vault_id,
+                fn_name: "deposit",
+                args: (user.clone(), usdc.clone(), amount).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.deposit(&user, &usdc, &amount);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_withdraw_direct_call_without_router_auth_is_rejected() {
+        let env = Env::default();
+        let (client, vault_id, usdc, _admin) = setup_direct_call(&env);
+        let user = Address::generate(&env);
+        client.deposit(&user, &usdc, &500_000_000i128);
+        env.ledger().set_sequence(env.ledger().sequence() + super::LOCK_DURATION + 1);
+
+        env.mock_auths(&[MockAuth {
+            address: &user,
+            invoke: &MockAuthInvoke {
+                contract: &vault_id,
+                fn_name: "withdraw",
+                args: (user.clone(), usdc.clone(), 500_000_000i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.withdraw(&user, &usdc, &500_000_000i128);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_early_exit_direct_call_without_router_auth_is_rejected() {
+        let env = Env::default();
+        let (client, vault_id, usdc, _admin) = setup_direct_call(&env);
+        let user = Address::generate(&env);
+        client.deposit(&user, &usdc, &500_000_000i128);
+
+        env.mock_auths(&[MockAuth {
+            address: &user,
+            invoke: &MockAuthInvoke {
+                contract: &vault_id,
+                fn_name: "early_exit",
+                args: (user.clone(), usdc.clone(), 500_000_000i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.early_exit(&user, &usdc, &500_000_000i128);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_relock_direct_call_without_router_auth_is_rejected() {
+        let env = Env::default();
+        let (client, vault_id, usdc, _admin) = setup_direct_call(&env);
+        let user = Address::generate(&env);
+        client.deposit(&user, &usdc, &500_000_000i128);
+        env.ledger().set_sequence(env.ledger().sequence() + super::LOCK_DURATION + 1);
+
+        env.mock_auths(&[MockAuth {
+            address: &user,
+            invoke: &MockAuthInvoke {
+                contract: &vault_id,
+                fn_name: "relock",
+                args: (user.clone(), usdc.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.relock(&user, &usdc);
+    }
+
+    /// Sanity check the other direction: the router (mocking only `admin`'s
+    /// auth, never the user's) can still call deposit — proving the fix
+    /// didn't just make every call fail.
+    #[test]
+    fn test_deposit_succeeds_with_admin_auth_only() {
+        let env = Env::default();
+        let (client, vault_id, usdc, admin) = setup_direct_call(&env);
+        let user = Address::generate(&env);
+        let amount = 500_000_000i128;
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &vault_id,
+                fn_name: "deposit",
+                args: (user.clone(), usdc.clone(), amount).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.deposit(&user, &usdc, &amount);
+        assert_eq!(client.balance(&user, &usdc), amount);
     }
 }

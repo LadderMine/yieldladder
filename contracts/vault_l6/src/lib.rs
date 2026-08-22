@@ -67,7 +67,8 @@ impl VaultL6 {
     /// moved the tokens from `user` to this contract before calling, so no
     /// token transfer happens here — this is bookkeeping only.
     pub fn deposit(env: Env, user: Address, asset: Address, amount: i128) {
-        user.require_auth();
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        admin.require_auth();
 
         if amount < 1_000_000_000 {
             panic_with_error!(&env, VaultError::BelowMinDeposit);
@@ -100,7 +101,8 @@ impl VaultL6 {
 
     /// Withdraw `amount` from a matured position for `asset`.
     pub fn withdraw(env: Env, user: Address, asset: Address, amount: i128) -> i128 {
-        user.require_auth();
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        admin.require_auth();
 
         let lock_until: u32 = env.storage().persistent().get(&DataKey::LockUntil(user.clone(), asset.clone())).unwrap_or(0);
         if env.ledger().sequence() < lock_until {
@@ -138,7 +140,8 @@ impl VaultL6 {
 
     /// Early exit `amount` before maturity for `asset`.
     pub fn early_exit(env: Env, user: Address, asset: Address, amount: i128) -> i128 {
-        user.require_auth();
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        admin.require_auth();
 
         let balance: i128 = env.storage().persistent().get(&DataKey::Balance(user.clone(), asset.clone())).unwrap_or(0);
         let user_shares: i128 = env.storage().persistent().get(&DataKey::Shares(user.clone(), asset.clone())).unwrap_or(0);
@@ -191,7 +194,8 @@ impl VaultL6 {
     }
 
     pub fn relock(env: Env, user: Address, asset: Address) -> u32 {
-        user.require_auth();
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        admin.require_auth();
 
         let lock_until: u32 = env
             .storage()
@@ -237,7 +241,10 @@ mod test {
     extern crate std;
 
     use super::VaultL6;
-    use soroban_sdk::{testutils::Address as _, Address, Env};
+    use soroban_sdk::{
+        testutils::{Address as _, MockAuth, MockAuthInvoke},
+        Address, Env, IntoVal,
+    };
 
     fn setup() -> (Env, super::VaultL6Client<'static>, Address, Address) {
         let env = Env::default();
@@ -326,5 +333,130 @@ mod test {
         let user = Address::generate(&env);
         client.deposit(&user, &usdc, &1_000_000_000i128);
         client.relock(&user, &usdc);
+    }
+
+    // ── Authorization boundary (issue #144) ─────────────────────────────────
+    // See vault_l3's identical block for the full rationale: deposit/
+    // withdraw/early_exit/relock must gate on the registered Admin
+    // (VaultRouter), never on `user` directly, or a direct call bypasses
+    // VaultRouter's pause flag, allowlist, and token transfer entirely.
+
+    fn setup_direct_call(env: &Env) -> (super::VaultL6Client<'static>, Address, Address, Address) {
+        env.mock_all_auths();
+        let vault_id = env.register_contract(None, VaultL6);
+        let client = super::VaultL6Client::new(env, &vault_id);
+        let admin = Address::generate(env);
+        let governance = Address::generate(env);
+        let strategy = Address::generate(env);
+        let usdc = Address::generate(env);
+        client.initialize(&admin, &governance, &strategy, &usdc, &0i128);
+        (client, vault_id, usdc, admin)
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_deposit_direct_call_without_router_auth_is_rejected() {
+        let env = Env::default();
+        let (client, vault_id, usdc, _admin) = setup_direct_call(&env);
+        let user = Address::generate(&env);
+        let amount = 1_000_000_000i128;
+
+        env.mock_auths(&[MockAuth {
+            address: &user,
+            invoke: &MockAuthInvoke {
+                contract: &vault_id,
+                fn_name: "deposit",
+                args: (user.clone(), usdc.clone(), amount).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.deposit(&user, &usdc, &amount);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_withdraw_direct_call_without_router_auth_is_rejected() {
+        let env = Env::default();
+        let (client, vault_id, usdc, _admin) = setup_direct_call(&env);
+        let user = Address::generate(&env);
+        client.deposit(&user, &usdc, &1_000_000_000i128);
+        env.ledger().set_sequence(env.ledger().sequence() + super::LOCK_DURATION + 1);
+
+        env.mock_auths(&[MockAuth {
+            address: &user,
+            invoke: &MockAuthInvoke {
+                contract: &vault_id,
+                fn_name: "withdraw",
+                args: (user.clone(), usdc.clone(), 1_000_000_000i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.withdraw(&user, &usdc, &1_000_000_000i128);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_early_exit_direct_call_without_router_auth_is_rejected() {
+        let env = Env::default();
+        let (client, vault_id, usdc, _admin) = setup_direct_call(&env);
+        let user = Address::generate(&env);
+        client.deposit(&user, &usdc, &1_000_000_000i128);
+
+        env.mock_auths(&[MockAuth {
+            address: &user,
+            invoke: &MockAuthInvoke {
+                contract: &vault_id,
+                fn_name: "early_exit",
+                args: (user.clone(), usdc.clone(), 1_000_000_000i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.early_exit(&user, &usdc, &1_000_000_000i128);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_relock_direct_call_without_router_auth_is_rejected() {
+        let env = Env::default();
+        let (client, vault_id, usdc, _admin) = setup_direct_call(&env);
+        let user = Address::generate(&env);
+        client.deposit(&user, &usdc, &1_000_000_000i128);
+        env.ledger().set_sequence(env.ledger().sequence() + super::LOCK_DURATION + 1);
+
+        env.mock_auths(&[MockAuth {
+            address: &user,
+            invoke: &MockAuthInvoke {
+                contract: &vault_id,
+                fn_name: "relock",
+                args: (user.clone(), usdc.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.relock(&user, &usdc);
+    }
+
+    #[test]
+    fn test_deposit_succeeds_with_admin_auth_only() {
+        let env = Env::default();
+        let (client, vault_id, usdc, admin) = setup_direct_call(&env);
+        let user = Address::generate(&env);
+        let amount = 1_000_000_000i128;
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &vault_id,
+                fn_name: "deposit",
+                args: (user.clone(), usdc.clone(), amount).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.deposit(&user, &usdc, &amount);
+        assert_eq!(client.balance(&user, &usdc), amount);
     }
 }

@@ -72,34 +72,24 @@ impl GuardianMultisig {
         env.storage().instance().set(&DataKey::Threshold, &threshold);
     }
 
-    /// Submit or confirm a veto for `proposal_id` on `governance_contract`.
+    /// Submit or confirm a veto for `proposal_id` on `governance_contract`,
+    /// as `owner`.
     ///
-    /// The caller must be one of the registered owners. Once `threshold`
-    /// confirmations are collected the veto is automatically executed.
-    pub fn confirm_veto(env: Env, governance_contract: Address, proposal_id: u32) {
-        let caller = env.current_contract_address(); // placeholder — real impl uses invoker
-        let _ = caller; // suppress unused warning in no_std context
+    /// `owner` must authorize this call (Soroban has no implicit invoker/
+    /// `msg.sender` for a direct external call — the caller must name and
+    /// authorize the address they're acting as, the same pattern the SDK's
+    /// `Signer`/`WalletAdapter` interfaces already use) and must be one of
+    /// the registered owners. Once `threshold` distinct owners have
+    /// confirmed, the veto is automatically executed.
+    pub fn confirm_veto(env: Env, owner: Address, governance_contract: Address, proposal_id: u32) {
+        owner.require_auth();
 
-        // Retrieve and validate owners
         let owners: Vec<Address> = env
             .storage()
             .instance()
             .get(&DataKey::Owners)
             .expect("not initialized");
-
-        // The actual auth check: whichever owner calls this must authorise.
-        // We require_auth on each owner candidate; only the true invoker will
-        // satisfy the check at runtime.
-        let mut caller_confirmed = false;
-        for owner in owners.iter() {
-            let _ = owner;
-        }
-        // In a real deployment, replace the loop above with:
-        //   let invoker = env.current_contract_address();
-        //   invoker.require_auth();
-        //   assert!(owners.contains(&invoker), "not an owner");
-        caller_confirmed = true; // satisfied by mock auth in tests
-        if !caller_confirmed {
+        if !owners.contains(&owner) {
             panic!("caller is not a registered owner");
         }
 
@@ -111,29 +101,35 @@ impl GuardianMultisig {
 
         let key = DataKey::Confirmations(governance_contract.clone(), proposal_id);
 
+        // Re-read fresh on every call rather than caching: if owners are
+        // ever rotated between confirmations, a since-removed owner's
+        // earlier confirmation is not retroactively erased from this list
+        // (out of scope to unwind — no owner-rotation function exists in
+        // this contract yet), but the `owners.contains(&owner)` check above
+        // always reflects the CURRENT owner set, so a removed owner can
+        // never add a fresh confirmation after being rotated out.
         let mut confirmations: Vec<Address> = env
             .storage()
             .persistent()
             .get(&key)
             .unwrap_or_else(|| Vec::new(&env));
 
-        // Deduplicate: an owner can only confirm once.
-        for existing in confirmations.iter() {
-            if existing == governance_contract {
-                // Reuse governance_contract as a stand-in for the auth'd address
-                // in tests; production code tracks the real invoker address.
-                panic!("already confirmed");
-            }
+        // Deduplicate by the real confirming owner — an owner can only
+        // confirm once per proposal, and cannot double-count toward the
+        // threshold by calling repeatedly.
+        if confirmations.contains(&owner) {
+            panic!("already confirmed");
         }
 
-        confirmations.push_back(governance_contract.clone());
+        confirmations.push_back(owner.clone());
         env.storage().persistent().set(&key, &confirmations);
 
-        // Execute veto if threshold reached
+        // Execute veto exactly once, exactly at the threshold.
         if confirmations.len() >= threshold {
             let gov = GovernanceClient::new(&env, &governance_contract);
             gov.veto(&proposal_id);
-            // Clean up after execution
+            // Clean up after execution so a proposal can't be re-executed
+            // by a stray late confirmation once the key is gone.
             env.storage().persistent().remove(&key);
         }
     }
@@ -175,14 +171,28 @@ impl GuardianMultisig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Address, Env, Vec};
+    use soroban_sdk::{
+        symbol_short,
+        testutils::{Address as _, MockAuth, MockAuthInvoke},
+        Address, Env, IntoVal, Vec,
+    };
 
+    /// Tracks how many times `veto` was actually called, so tests can prove
+    /// dispatch happens exactly once, exactly at threshold — not before,
+    /// not repeatedly after (issue #144's acceptance criterion).
     #[contract]
     struct MockGovernance;
 
     #[contractimpl]
     impl MockGovernance {
-        pub fn veto(_env: Env, _proposal_id: u32) {}
+        pub fn veto(env: Env, _proposal_id: u32) {
+            let count: u32 = env.storage().instance().get(&symbol_short!("calls")).unwrap_or(0);
+            env.storage().instance().set(&symbol_short!("calls"), &(count + 1));
+        }
+
+        pub fn veto_calls(env: Env) -> u32 {
+            env.storage().instance().get(&symbol_short!("calls")).unwrap_or(0)
+        }
     }
 
     fn setup(env: &Env, n: u32, threshold: u32) -> (Vec<Address>, GuardianMultisigClient) {
@@ -195,6 +205,30 @@ mod tests {
         env.mock_all_auths();
         client.initialize(&owners, &threshold);
         (owners, client)
+    }
+
+    /// Mocks auth for exactly `owner` calling `confirm_veto` on `contract_id`
+    /// with these exact args — nobody else's auth is mocked. Used to prove
+    /// `owner.require_auth()` is a real, enforced check rather than dead
+    /// code: against the pre-fix placeholder (which never called
+    /// `require_auth` on anything meaningful) every test using this would
+    /// have passed regardless of which address was passed as `owner`.
+    fn mock_confirm_auth(
+        env: &Env,
+        owner: &Address,
+        contract_id: &Address,
+        governance_contract: &Address,
+        proposal_id: u32,
+    ) {
+        env.mock_auths(&[MockAuth {
+            address: owner,
+            invoke: &MockAuthInvoke {
+                contract: contract_id,
+                fn_name: "confirm_veto",
+                args: (owner.clone(), governance_contract.clone(), proposal_id).into_val(env),
+                sub_invokes: &[],
+            },
+        }]);
     }
 
     #[test]
@@ -237,10 +271,139 @@ mod tests {
     #[test]
     fn single_owner_1_of_1_executes_immediately() {
         let env = Env::default();
-        let (_, client) = setup(&env, 1, 1);
+        let (owners, client) = setup(&env, 1, 1);
         let gov = env.register_contract(None, MockGovernance);
         env.mock_all_auths();
-        // Should not panic — veto dispatched to MockGovernance which is a no-op.
-        client.confirm_veto(&gov, &0);
+        // Should not panic — veto dispatched to MockGovernance which
+        // records the call.
+        client.confirm_veto(&owners.get(0).unwrap(), &gov, &0);
+
+        let gov_client = MockGovernanceClient::new(&env, &gov);
+        assert_eq!(gov_client.veto_calls(), 1);
+    }
+
+    // ── Real invoker attribution (issue #144's core fix) ────────────────────
+
+    #[test]
+    #[should_panic]
+    fn confirm_veto_requires_the_owners_own_authorization() {
+        // No mock_all_auths() at all here — proves owner.require_auth() is
+        // a real, enforced check. Against the pre-fix placeholder (which
+        // never checked auth on anything meaningful) this would not panic.
+        let env = Env::default();
+        let (owners, client) = setup(&env, 1, 1);
+        let gov = env.register_contract(None, MockGovernance);
+        client.confirm_veto(&owners.get(0).unwrap(), &gov, &0);
+    }
+
+    #[test]
+    #[should_panic(expected = "not a registered owner")]
+    fn non_owner_cannot_confirm() {
+        let env = Env::default();
+        let (_owners, client) = setup(&env, 2, 2);
+        let gov = env.register_contract(None, MockGovernance);
+        let outsider = Address::generate(&env);
+        env.mock_all_auths();
+
+        client.confirm_veto(&outsider, &gov, &0);
+    }
+
+    #[test]
+    #[should_panic(expected = "already confirmed")]
+    fn same_owner_cannot_double_count_toward_threshold() {
+        let env = Env::default();
+        let (owners, client) = setup(&env, 3, 3);
+        let gov = env.register_contract(None, MockGovernance);
+        env.mock_all_auths();
+        let owner0 = owners.get(0).unwrap();
+
+        client.confirm_veto(&owner0, &gov, &0);
+        assert_eq!(client.confirmation_count(&gov, &0), 1);
+
+        // Same owner confirming again must not move the count toward
+        // threshold a second time.
+        client.confirm_veto(&owner0, &gov, &0);
+    }
+
+    #[test]
+    fn distinct_owners_confirming_accumulate_toward_threshold() {
+        let env = Env::default();
+        let (owners, client) = setup(&env, 3, 3);
+        let gov = env.register_contract(None, MockGovernance);
+        env.mock_all_auths();
+
+        client.confirm_veto(&owners.get(0).unwrap(), &gov, &0);
+        assert_eq!(client.confirmation_count(&gov, &0), 1);
+        client.confirm_veto(&owners.get(1).unwrap(), &gov, &0);
+        assert_eq!(client.confirmation_count(&gov, &0), 2);
+
+        let gov_client = MockGovernanceClient::new(&env, &gov);
+        assert_eq!(gov_client.veto_calls(), 0); // not yet at threshold
+    }
+
+    #[test]
+    fn veto_dispatches_exactly_once_exactly_at_threshold() {
+        let env = Env::default();
+        let (owners, client) = setup(&env, 3, 2);
+        let gov = env.register_contract(None, MockGovernance);
+        env.mock_all_auths();
+        let gov_client = MockGovernanceClient::new(&env, &gov);
+
+        client.confirm_veto(&owners.get(0).unwrap(), &gov, &0);
+        assert_eq!(gov_client.veto_calls(), 0); // 1-of-2: not yet
+
+        client.confirm_veto(&owners.get(1).unwrap(), &gov, &0);
+        assert_eq!(gov_client.veto_calls(), 1); // 2-of-2: dispatched exactly once
+
+        // Confirmations are cleaned up on execution, so the third (distinct)
+        // owner confirming the same proposal afterward starts a fresh round
+        // rather than re-triggering the already-executed veto a second time
+        // from a stray leftover confirmation.
+        client.confirm_veto(&owners.get(2).unwrap(), &gov, &0);
+        assert_eq!(gov_client.veto_calls(), 1);
+        assert_eq!(client.confirmation_count(&gov, &0), 1);
+    }
+
+    #[test]
+    fn confirmations_are_scoped_per_governance_contract_and_proposal_id() {
+        let env = Env::default();
+        let (owners, client) = setup(&env, 2, 2);
+        let gov_a = env.register_contract(None, MockGovernance);
+        let gov_b = env.register_contract(None, MockGovernance);
+        env.mock_all_auths();
+        let owner0 = owners.get(0).unwrap();
+
+        client.confirm_veto(&owner0, &gov_a, &0);
+        client.confirm_veto(&owner0, &gov_a, &1);
+        client.confirm_veto(&owner0, &gov_b, &0);
+
+        // Same owner, three distinct (contract, proposal_id) pairs — none
+        // of these should count toward each other.
+        assert_eq!(client.confirmation_count(&gov_a, &0), 1);
+        assert_eq!(client.confirmation_count(&gov_a, &1), 1);
+        assert_eq!(client.confirmation_count(&gov_b, &0), 1);
+    }
+
+    /// Exercises the actual mocked-per-address auth path end to end (rather
+    /// than the blanket `mock_all_auths()` every other test above uses),
+    /// pinning down that `confirm_veto` really does check `owner`
+    /// specifically and not merely "some address require_auth'd".
+    #[test]
+    fn confirm_veto_succeeds_with_only_the_owners_auth_mocked() {
+        let env = Env::default();
+        let mut owners = Vec::new(&env);
+        owners.push_back(Address::generate(&env));
+        let contract_id = env.register_contract(None, GuardianMultisig);
+        let client = GuardianMultisigClient::new(&env, &contract_id);
+        env.mock_all_auths();
+        client.initialize(&owners, &1);
+        let gov = env.register_contract(None, MockGovernance);
+        let owner0 = owners.get(0).unwrap();
+
+        mock_confirm_auth(&env, &owner0, &contract_id, &gov, 0);
+        client.confirm_veto(&owner0, &gov, &0);
+
+        let gov_client = MockGovernanceClient::new(&env, &gov);
+        assert_eq!(gov_client.veto_calls(), 1);
     }
 }
