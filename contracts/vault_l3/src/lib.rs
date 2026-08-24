@@ -1,5 +1,13 @@
 #![no_std]
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Env};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
+    Env, Symbol,
+};
+
+// Event topics (issue #145) — "early_exit" exceeds the 9-char symbol_short!
+// limit, so its topic is built with Symbol::new at the call site instead.
+const TOPIC_DEPOSIT: Symbol = symbol_short!("deposit");
+const TOPIC_WITHDRAW: Symbol = symbol_short!("withdraw");
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -129,6 +137,9 @@ impl VaultL3 {
 
         let checkpoint = env.ledger().sequence() + 1;
         env.storage().persistent().set(&DataKey::Checkpoint(user.clone(), asset.clone()), &checkpoint);
+
+        env.events()
+            .publish((TOPIC_DEPOSIT, user, asset), amount);
     }
 
     /// Withdraw `amount` from a matured position for `asset`.
@@ -138,6 +149,13 @@ impl VaultL3 {
     ///   reduces Balance/Shares, leaves LockUntil/Checkpoint untouched.
     /// - If `amount > balance`: rejected with `AmountExceedsBalance`.
     pub fn withdraw(env: Env, user: Address, asset: Address, amount: i128) -> i128 {
+        let payout = Self::do_withdraw(&env, &user, &asset, amount);
+        env.events()
+            .publish((TOPIC_WITHDRAW, user, asset), payout);
+        payout
+    }
+
+    fn do_withdraw(env: &Env, user: &Address, asset: &Address, amount: i128) -> i128 {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
         admin.require_auth();
 
@@ -150,7 +168,7 @@ impl VaultL3 {
         if !emergency {
             let lock_until: u32 = env.storage().persistent().get(&DataKey::LockUntil(user.clone(), asset.clone())).unwrap_or(0);
             if env.ledger().sequence() < lock_until {
-                panic_with_error!(&env, VaultError::LockNotExpired);
+                panic_with_error!(env, VaultError::LockNotExpired);
             }
         }
 
@@ -159,7 +177,7 @@ impl VaultL3 {
         let total_shares: i128 = env.storage().instance().get(&DataKey::TotalShares).unwrap_or(0);
 
         if amount > balance {
-            panic_with_error!(&env, VaultError::AmountExceedsBalance);
+            panic_with_error!(env, VaultError::AmountExceedsBalance);
         }
 
         if amount >= balance {
@@ -192,6 +210,13 @@ impl VaultL3 {
     /// - If `amount < balance`: partial early exit, remainder stays.
     /// - If `amount > balance`: rejected with `AmountExceedsBalance`.
     pub fn early_exit(env: Env, user: Address, asset: Address, amount: i128) -> i128 {
+        let net_amount = Self::do_early_exit(&env, &user, &asset, amount);
+        env.events()
+            .publish((Symbol::new(&env, "early_exit"), user, asset), net_amount);
+        net_amount
+    }
+
+    fn do_early_exit(env: &Env, user: &Address, asset: &Address, amount: i128) -> i128 {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
         admin.require_auth();
 
@@ -200,7 +225,7 @@ impl VaultL3 {
         let total_shares: i128 = env.storage().instance().get(&DataKey::TotalShares).unwrap_or(0);
 
         if amount > balance {
-            panic_with_error!(&env, VaultError::AmountExceedsBalance);
+            panic_with_error!(env, VaultError::AmountExceedsBalance);
         }
 
         let emergency: bool = env

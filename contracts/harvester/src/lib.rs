@@ -1,8 +1,15 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env, Symbol};
 
 const BOUNTY_BPS: i128 = 10;
 const BPS_DENOMINATOR: i128 = 10_000;
+
+/// Event topic (issue #145) — data is `(harvested, bounty, remainder, caller)`.
+/// A zero-yield harvest (see the early-return below) still emits this event
+/// with `harvested == 0` so reconciliation can distinguish "harvest ran and
+/// found nothing" from "harvest never ran" without re-deriving it from
+/// `last_harvest`/`next_harvest_ledger` alone.
+const TOPIC_HARVEST: Symbol = symbol_short!("harvest");
 
 #[contracttype]
 pub enum DataKey {
@@ -83,6 +90,8 @@ impl Harvester {
                 .instance()
                 .set(&DataKey::LastHarvestLedger, &current);
             env.storage().instance().extend_ttl(17_280, 17_280);
+            env.events()
+                .publish((TOPIC_HARVEST, caller), (0i128, 0i128, 0i128));
             return 0;
         }
 
@@ -111,6 +120,9 @@ impl Harvester {
             .instance()
             .set(&DataKey::LastHarvestLedger, &current);
         env.storage().instance().extend_ttl(17_280, 17_280);
+
+        env.events()
+            .publish((TOPIC_HARVEST, caller), (harvested, bounty, remainder));
 
         harvested
     }

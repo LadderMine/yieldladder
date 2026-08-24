@@ -1,5 +1,13 @@
 #![no_std]
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Env};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
+    Env, Symbol,
+};
+
+// Event topics (issue #145) — "early_exit" exceeds the 9-char symbol_short!
+// limit, so its topic is built with Symbol::new at the call site instead.
+const TOPIC_DEPOSIT: Symbol = symbol_short!("deposit");
+const TOPIC_WITHDRAW: Symbol = symbol_short!("withdraw");
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -97,16 +105,26 @@ impl VaultL12 {
         env.storage().persistent().set(&DataKey::LockUntil(user.clone(), asset.clone()), &lock_until);
         let checkpoint = env.ledger().sequence() + 1;
         env.storage().persistent().set(&DataKey::Checkpoint(user.clone(), asset.clone()), &checkpoint);
+
+        env.events()
+            .publish((TOPIC_DEPOSIT, user, asset), amount);
     }
 
     /// Withdraw `amount` from a matured position for `asset`.
     pub fn withdraw(env: Env, user: Address, asset: Address, amount: i128) -> i128 {
+        let payout = Self::do_withdraw(&env, &user, &asset, amount);
+        env.events()
+            .publish((TOPIC_WITHDRAW, user, asset), payout);
+        payout
+    }
+
+    fn do_withdraw(env: &Env, user: &Address, asset: &Address, amount: i128) -> i128 {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
         admin.require_auth();
 
         let lock_until: u32 = env.storage().persistent().get(&DataKey::LockUntil(user.clone(), asset.clone())).unwrap_or(0);
         if env.ledger().sequence() < lock_until {
-            panic_with_error!(&env, VaultError::LockNotExpired);
+            panic_with_error!(env, VaultError::LockNotExpired);
         }
 
         let balance: i128 = env.storage().persistent().get(&DataKey::Balance(user.clone(), asset.clone())).unwrap_or(0);
@@ -114,7 +132,7 @@ impl VaultL12 {
         let total_shares: i128 = env.storage().instance().get(&DataKey::TotalShares).unwrap_or(0);
 
         if amount > balance {
-            panic_with_error!(&env, VaultError::AmountExceedsBalance);
+            panic_with_error!(env, VaultError::AmountExceedsBalance);
         }
 
         if amount >= balance {
@@ -140,6 +158,13 @@ impl VaultL12 {
 
     /// Early exit `amount` before maturity for `asset`.
     pub fn early_exit(env: Env, user: Address, asset: Address, amount: i128) -> i128 {
+        let net_amount = Self::do_early_exit(&env, &user, &asset, amount);
+        env.events()
+            .publish((Symbol::new(&env, "early_exit"), user, asset), net_amount);
+        net_amount
+    }
+
+    fn do_early_exit(env: &Env, user: &Address, asset: &Address, amount: i128) -> i128 {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
         admin.require_auth();
 
@@ -148,7 +173,7 @@ impl VaultL12 {
         let total_shares: i128 = env.storage().instance().get(&DataKey::TotalShares).unwrap_or(0);
 
         if amount > balance {
-            panic_with_error!(&env, VaultError::AmountExceedsBalance);
+            panic_with_error!(env, VaultError::AmountExceedsBalance);
         }
 
         // Exit fee: 2.50% on withdrawn amount only

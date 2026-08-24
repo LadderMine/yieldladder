@@ -200,6 +200,17 @@ export class YieldLadder {
     return positions.find(p => p.principal !== '0') ?? positions[0];
   }
 
+  /**
+   * Reads `address`'s position in one specific `tier`. Unlike `position()`,
+   * which collapses all four tiers down to "the first with a non-zero
+   * principal," this doesn't discard the others — needed once a single
+   * account holds positions in more than one tier at a time (issue #145's
+   * end-to-end demo deposits into 2+ tiers and needs to observe each one).
+   */
+  async positionForTier(address: string, tier: Tier): Promise<Position> {
+    return this.queryTierPosition(address, tier);
+  }
+
   private toStroops(amount: string): bigint {
     const [whole = '0', frac = ''] = amount.split('.');
     const fracPadded = frac.padEnd(USDC_DECIMALS, '0').slice(0, USDC_DECIMALS);
