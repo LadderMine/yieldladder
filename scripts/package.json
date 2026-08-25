@@ -1,0 +1,23 @@
+{
+  "name": "@yieldladder/scripts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Testnet deployment, reconciliation, observability, and demo tooling for issue #145.",
+  "type": "module",
+  "scripts": {
+    "reconcile": "tsx src/reconcile.ts",
+    "report": "tsx src/operational-report.ts",
+    "demo": "tsx src/e2e-demo.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@stellar/stellar-sdk": "^12.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "tsx": "^4.15.0",
+    "typescript": "^5.9.3",
+    "vitest": "^1.6.0"
+  }
+}

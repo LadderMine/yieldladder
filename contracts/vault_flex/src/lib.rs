@@ -10,6 +10,11 @@ const STRATEGY_KEY: Symbol = symbol_short!("strategy");
 const TOTAL_SHARES_KEY: Symbol = symbol_short!("t_shares");
 const TOTAL_BALANCE_KEY: Symbol = symbol_short!("t_bal");
 
+// Event topics (issue #145) — "early_exit" exceeds the 9-char symbol_short!
+// limit, so its topic is built with Symbol::new at the call site instead.
+const TOPIC_DEPOSIT: Symbol = symbol_short!("deposit");
+const TOPIC_WITHDRAW: Symbol = symbol_short!("withdraw");
+
 #[derive(Clone)]
 #[contracttype]
 pub enum DataKey {
@@ -61,6 +66,9 @@ impl VaultFlex {
 
         // Audit M-01 Safeguard: Log checkpoint rule delay sequence via shared infrastructure
         record_deposit_checkpoint(&env, &user, &asset);
+
+        env.events()
+            .publish((TOPIC_DEPOSIT, user, asset), amount);
     }
 
     /// Withdraw `amount` from the caller's Flex position for `asset`. Only
@@ -82,6 +90,26 @@ impl VaultFlex {
     /// Flex now tracks its own principal balance exactly like the locked
     /// tiers instead.
     pub fn withdraw(env: Env, user: Address, asset: Address, amount: i128) -> i128 {
+        let payout = Self::do_withdraw(&env, &user, &asset, amount);
+        env.events()
+            .publish((TOPIC_WITHDRAW, user, asset), payout);
+        payout
+    }
+
+    /// Flex has no lock period, so early exit is equivalent to a plain
+    /// withdrawal: no fee, no maturity check. Kept as a distinct entry
+    /// point so VaultRouter's early_exit forwarding works uniformly across
+    /// all four tiers, and so it emits its own "early_exit" event distinct
+    /// from "withdraw" (issue #145 — reconciliation/observability needs to
+    /// tell the two apart even though the payout math is identical here).
+    pub fn early_exit(env: Env, user: Address, asset: Address, amount: i128) -> i128 {
+        let payout = Self::do_withdraw(&env, &user, &asset, amount);
+        env.events()
+            .publish((Symbol::new(&env, "early_exit"), user, asset), payout);
+        payout
+    }
+
+    fn do_withdraw(env: &Env, user: &Address, asset: &Address, amount: i128) -> i128 {
         let admin: Address = env.storage().instance().get(&ADMIN_KEY).expect("Uninitialized");
         admin.require_auth();
 
@@ -115,14 +143,6 @@ impl VaultFlex {
         env.storage().instance().set(&TOTAL_BALANCE_KEY, &(total_balance - amount));
 
         amount
-    }
-
-    /// Flex has no lock period, so early exit is equivalent to a plain
-    /// withdrawal: no fee, no maturity check. Kept as a distinct entry
-    /// point so VaultRouter's early_exit forwarding works uniformly across
-    /// all four tiers.
-    pub fn early_exit(env: Env, user: Address, asset: Address, amount: i128) -> i128 {
-        Self::withdraw(env, user, asset, amount)
     }
 
     /// Flex has no lock; always returns 0. Present for ABI parity with the

@@ -179,6 +179,23 @@ To report a security vulnerability, see `security/bounty.md` or email `security@
 
 Mainnet addresses are published after audit completion. Testnet addresses are in `deployments/testnet.json`.
 
+## Testnet deployment, reconciliation & demo
+
+`scripts/` (issue #145) holds the tooling that deploys this stack to
+Soroban testnet, reconciles on-chain state against expected outcomes, and
+runs an end-to-end deposit → harvest → withdraw demo through the real SDK:
+
+```bash
+cd scripts && pnpm install
+./deploy-testnet.sh                        # populates deployments/testnet.json
+DEMO_SECRET_KEY=S... pnpm demo             # deposit -> harvest -> withdraw walkthrough
+RECONCILE_READER_PUBLIC_KEY=G... pnpm reconcile  # balance/shares/harvest-split cross-checks
+RECONCILE_READER_PUBLIC_KEY=G... pnpm report     # TVL-vs-cap and harvest-cadence health
+```
+
+See `scripts/README.md` for the full reproducible walkthrough, required
+environment variables, and what each check covers.
+
 ## SDK
 
 ```typescript
